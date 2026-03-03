@@ -311,6 +311,7 @@ export function useChatSessionState({
     pendingScrollRestoreRef.current = null;
     prevSessionMessagesLengthRef.current = 0;
     isInitialLoadRef.current = true;
+    setVisibleMessageCount(INITIAL_VISIBLE_MESSAGES);
     setIsUserScrolledUp(false);
   }, [selectedProject?.name, selectedSession?.id]);
 
@@ -529,6 +530,7 @@ export function useChatSessionState({
       pendingViewSessionRef.current = null;
     }
   }, [pendingViewSessionRef, selectedSession?.id]);
+
 
   useEffect(() => {
     // Only sync sessionMessages to chatMessages when:
