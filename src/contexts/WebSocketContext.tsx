@@ -88,6 +88,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           // Ignore keepalive pong responses — they should not trigger re-renders
           if (data.type === 'pong') return;
           setLatestMessage(data);
+          console.log('--->Received WebSocket message:', data);
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
         }
