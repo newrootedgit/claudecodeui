@@ -35,6 +35,7 @@ export default function AppContent() {
     isLoadingProjects,
     isInputFocused,
     externalMessageUpdate,
+    selectedTerminalId,
     setActiveTab,
     setSidebarOpen,
     setIsInputFocused,
@@ -181,6 +182,7 @@ export default function AppContent() {
           onNavigateToSession={(targetSessionId: string) => navigate(`/session/${targetSessionId}`)}
           onShowSettings={() => setShowSettings(true)}
           externalMessageUpdate={externalMessageUpdate}
+          selectedTerminalId={selectedTerminalId}
         />
       </div>
 

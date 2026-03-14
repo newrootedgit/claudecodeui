@@ -27,6 +27,7 @@ function Sidebar({
   onNewSession,
   onSessionDelete,
   onProjectDelete,
+  onTerminalSelect,
   isLoading,
   loadingProgress,
   onRefresh,
@@ -123,6 +124,7 @@ function Sidebar({
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
+    onTerminalSelect,
   });
 
   useEffect(() => {

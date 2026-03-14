@@ -74,6 +74,7 @@ type UseSidebarControllerArgs = {
   setCurrentProject: (project: Project) => void;
   setSidebarVisible: (visible: boolean) => void;
   sidebarVisible: boolean;
+  onTerminalSelect?: (terminalSessionId: string) => void;
 };
 
 export function useSidebarController({
@@ -91,6 +92,7 @@ export function useSidebarController({
   setCurrentProject,
   setSidebarVisible,
   sidebarVisible,
+  onTerminalSelect,
 }: UseSidebarControllerArgs) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [editingProject, setEditingProject] = useState<string | null>(null);
@@ -603,9 +605,11 @@ export function useSidebarController({
   const handleTerminalSelect = useCallback(
     (terminal: TerminalSession) => {
       setSelectedTerminalSessionId(terminal.sessionId);
-      onSessionSelect({ id: terminal.sessionId, __provider: 'claude' as const, __terminalSession: terminal } as ProjectSession);
+      if (onTerminalSelect) {
+        onTerminalSelect(terminal.sessionId);
+      }
     },
-    [onSessionSelect],
+    [onTerminalSelect],
   );
 
   const handleNewTerminal = useCallback(
@@ -620,13 +624,14 @@ export function useSidebarController({
           [projectPath]: [newSession, ...(prev[projectPath] || [])],
         }));
         setSelectedTerminalSessionId(newSession.sessionId);
-        // Signal to parent that a terminal was selected
-        onSessionSelect({ id: newSession.sessionId, __provider: 'claude' as const, __terminalSession: newSession } as ProjectSession);
+        if (onTerminalSelect) {
+          onTerminalSelect(newSession.sessionId);
+        }
       } catch (error) {
         console.error('[Sidebar] Error creating terminal session:', error);
       }
     },
-    [terminalSessions, onSessionSelect],
+    [terminalSessions, onTerminalSelect],
   );
 
   const handleTerminalDelete = useCallback(

@@ -415,11 +415,25 @@ export function useProjectsState({
 
   const handleNewSession = useCallback(
     (project: Project) => {
+      setSelectedTerminalId(null);
       setSelectedProject(project);
       setSelectedSession(null);
       setActiveTab('chat');
       navigate('/');
 
+      if (isMobile) {
+        setSidebarOpen(false);
+      }
+    },
+    [isMobile, navigate],
+  );
+
+  const handleTerminalSelect = useCallback(
+    (terminalSessionId: string) => {
+      setSelectedTerminalId(terminalSessionId);
+      setActiveTab('shell');
+      setSelectedSession(null);
+      navigate('/');
       if (isMobile) {
         setSidebarOpen(false);
       }
@@ -517,6 +531,7 @@ export function useProjectsState({
       onNewSession: handleNewSession,
       onSessionDelete: handleSessionDelete,
       onProjectDelete: handleProjectDelete,
+      onTerminalSelect: handleTerminalSelect,
       isLoading: isLoadingProjects,
       loadingProgress,
       onRefresh: handleSidebarRefresh,
@@ -533,6 +548,7 @@ export function useProjectsState({
       handleSessionDelete,
       handleSessionSelect,
       handleSidebarRefresh,
+      handleTerminalSelect,
       isLoadingProjects,
       isMobile,
       loadingProgress,
@@ -572,5 +588,6 @@ export function useProjectsState({
     handleSidebarRefresh,
     selectedTerminalId,
     setSelectedTerminalId,
+    handleTerminalSelect,
   };
 }
