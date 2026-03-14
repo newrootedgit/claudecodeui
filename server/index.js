@@ -1634,6 +1634,7 @@ function handleShellConnection(ws) {
     console.log('🐚 Shell client connected');
     let shellProcess = null;
     let ptySessionKey = null;
+    const connectionId = Math.random().toString(36).slice(2);
     let urlDetectionBuffer = '';
     const announcedAuthUrls = new Set();
 
@@ -1715,7 +1716,7 @@ function handleShellConnection(ws) {
                         // Spawn node-pty attached to tmux
                         const termCols = data.cols || 120;
                         const termRows = data.rows || 30;
-                        shellProcess = pty.spawn('tmux', ['attach-session', '-t', tmuxId], {
+                        shellProcess = pty.spawn('tmux', ['attach-session', '-d', '-t', tmuxId], {
                             name: 'xterm-256color',
                             cols: termCols,
                             rows: termRows,
@@ -1736,7 +1737,8 @@ function handleShellConnection(ws) {
                             timeoutId: null,
                             projectPath: data.projectPath,
                             sessionId: tmuxId,
-                            isTmux: true
+                            isTmux: true,
+                            connectionId: connectionId
                         });
 
                         // Handle data output from tmux
@@ -2094,13 +2096,16 @@ function handleShellConnection(ws) {
             const session = ptySessionsMap.get(ptySessionKey);
             if (session) {
                 if (session.isTmux) {
-                    // For tmux sessions: kill the PTY attachment immediately
-                    // The tmux session itself persists independently
-                    console.log('🐚 Tmux PTY detaching (tmux session persists):', ptySessionKey);
-                    if (session.pty && session.pty.kill) {
-                        try { session.pty.kill(); } catch {}
+                    // For tmux sessions: only kill OUR PTY, not a replacement from a newer connection
+                    if (session.connectionId === connectionId) {
+                        console.log('🐚 Tmux PTY detaching (tmux session persists):', ptySessionKey);
+                        if (session.pty && session.pty.kill) {
+                            try { session.pty.kill(); } catch {}
+                        }
+                        ptySessionsMap.delete(ptySessionKey);
+                    } else {
+                        console.log('🐚 Skipping tmux PTY cleanup (replaced by newer connection):', ptySessionKey);
                     }
-                    ptySessionsMap.delete(ptySessionKey);
                 } else {
                     // For regular sessions: keep alive with 30-min timeout
                     console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', ptySessionKey);
