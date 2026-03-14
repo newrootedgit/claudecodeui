@@ -48,6 +48,7 @@ function MainContent({
   onNavigateToSession,
   onShowSettings,
   externalMessageUpdate,
+  selectedTerminalId,
 }: MainContentProps) {
   const { preferences } = useUiPreferences();
   const { autoExpandTools, showRawParameters, showThinking, autoScrollToBottom, sendByCtrlEnter } = preferences;
@@ -148,9 +149,11 @@ function MainContent({
             <div className="h-full w-full overflow-hidden">
               <StandaloneShell
                 project={selectedProject}
-                session={selectedSession}
+                session={selectedTerminalId ? null : selectedSession}
                 showHeader={false}
                 isActive={activeTab === 'shell'}
+                tmuxSessionId={selectedTerminalId}
+                autoConnect={true}
               />
             </div>
           )}

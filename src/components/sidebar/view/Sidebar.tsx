@@ -97,6 +97,17 @@ function Sidebar({
     setDeleteConfirmation,
     setSessionDeleteConfirmation,
     setShowVersionModal,
+    getTerminalSessionsForProject,
+    selectedTerminalSessionId,
+    handleTerminalSelect,
+    handleNewTerminal,
+    handleTerminalDelete,
+    editingTerminal,
+    editingTerminalName,
+    setEditingTerminalName,
+    startEditingTerminal,
+    cancelEditingTerminal,
+    saveEditingTerminal,
   } = useSidebarController({
     projects,
     selectedProject,
@@ -179,6 +190,23 @@ function Sidebar({
     },
     onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: SessionProvider) => {
       void updateSessionSummary(projectName, sessionId, summary, provider);
+    },
+    getTerminalSessionsForProject,
+    selectedTerminalSessionId,
+    editingTerminal,
+    editingTerminalName,
+    onEditingTerminalNameChange: setEditingTerminalName,
+    onStartEditingTerminal: startEditingTerminal,
+    onCancelEditingTerminal: cancelEditingTerminal,
+    onSaveEditingTerminal: (sessionId: string, newName: string) => {
+      void saveEditingTerminal(sessionId, newName);
+    },
+    onTerminalSelect: handleTerminalSelect,
+    onTerminalDelete: (sessionId: string) => {
+      void handleTerminalDelete(sessionId);
+    },
+    onNewTerminal: (project: Project) => {
+      void handleNewTerminal(project);
     },
     t,
   };

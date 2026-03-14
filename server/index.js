@@ -65,6 +65,7 @@ import userRoutes from './routes/user.js';
 import codexRoutes from './routes/codex.js';
 import geminiRoutes from './routes/gemini.js';
 import pluginsRoutes from './routes/plugins.js';
+import terminalRoutes from './routes/terminal.js';
 import { startEnabledPluginServers, stopAllPlugins } from './utils/plugin-process-manager.js';
 import { initializeDatabase, sessionNamesDb, applyCustomSessionNames } from './database/db.js';
 import { configureWebPush } from './services/vapid-keys.js';
@@ -222,6 +223,30 @@ const server = http.createServer(app);
 
 const ptySessionsMap = new Map();
 const PTY_SESSION_TIMEOUT = 30 * 60 * 1000;
+
+// Cleanup stale terminal sessions every 5 minutes
+setInterval(async () => {
+  try {
+    const { terminalSessionsDb } = await import('./database/db.js');
+    const { execSync } = await import('child_process');
+    const dbSessions = terminalSessionsDb.getAllSessions();
+    let aliveTmuxSessions = [];
+    try {
+      const output = execSync('tmux list-sessions -F "#{session_name}" 2>/dev/null', { encoding: 'utf-8' });
+      aliveTmuxSessions = output.trim().split('\n').filter(Boolean);
+    } catch {}
+
+    for (const session of dbSessions) {
+      if (session.session_id.startsWith('term_') && !aliveTmuxSessions.includes(session.session_id)) {
+        console.log(`🧹 Marking stale terminal session inactive: ${session.session_id}`);
+        terminalSessionsDb.deleteSession(session.session_id);
+      }
+    }
+  } catch (err) {
+    // Silently ignore cleanup errors
+  }
+}, 5 * 60 * 1000);
+
 const SHELL_URL_PARSE_BUFFER_LIMIT = 32768;
 const ANSI_ESCAPE_SEQUENCE_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const TRAILING_URL_PUNCTUATION_REGEX = /[)\]}>.,;:!?]+$/;
@@ -394,6 +419,7 @@ app.use('/api/gemini', authenticateToken, geminiRoutes);
 
 // Plugins API Routes (protected)
 app.use('/api/plugins', authenticateToken, pluginsRoutes);
+app.use('/api/terminal', authenticateToken, terminalRoutes);
 
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
@@ -1626,6 +1652,130 @@ function handleShellConnection(ws) {
                 urlDetectionBuffer = '';
                 announcedAuthUrls.clear();
 
+                // Handle tmux-backed persistent terminal sessions
+                if (data.tmuxSessionId) {
+                    const tmuxId = data.tmuxSessionId;
+                    // Validate tmux session ID format
+                    if (!/^[a-zA-Z0-9_\-]+$/.test(tmuxId)) {
+                        ws.send(JSON.stringify({ type: 'error', message: 'Invalid tmux session ID' }));
+                        return;
+                    }
+
+                    ptySessionKey = `tmux_${tmuxId}`;
+
+                    // Check if we already have a node-pty attachment for this tmux session
+                    const existingTmux = ptySessionsMap.get(ptySessionKey);
+                    if (existingTmux) {
+                        // Disconnect previous WebSocket if any
+                        if (existingTmux.ws && existingTmux.ws !== ws && existingTmux.ws.readyState === WebSocket.OPEN) {
+                            existingTmux.ws.close();
+                        }
+                        // Kill existing PTY attachment to re-attach cleanly
+                        if (existingTmux.pty && existingTmux.pty.kill) {
+                            try { existingTmux.pty.kill(); } catch {}
+                        }
+                        if (existingTmux.timeoutId) clearTimeout(existingTmux.timeoutId);
+                        ptySessionsMap.delete(ptySessionKey);
+                    }
+
+                    // Ensure tmux session exists
+                    try {
+                        const { execSync } = await import('child_process');
+                        try {
+                            execSync(`tmux has-session -t "${tmuxId}" 2>/dev/null`, { stdio: 'ignore' });
+                        } catch {
+                            // Session doesn't exist, create it
+                            const projectPath = data.projectPath || process.cwd();
+                            const resolvedPath = path.resolve(projectPath);
+                            const termCols = data.cols || 120;
+                            const termRows = data.rows || 30;
+                            execSync(
+                                `tmux new-session -d -s "${tmuxId}" -c "${resolvedPath}" -x ${termCols} -y ${termRows}`,
+                                { stdio: 'ignore' }
+                            );
+                        }
+
+                        // Capture existing pane content for instant visual restore
+                        let capturedContent = '';
+                        try {
+                            capturedContent = execSync(
+                                `tmux capture-pane -p -t "${tmuxId}" -S -5000`,
+                                { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }
+                            );
+                        } catch {}
+
+                        // Send captured content as initial output
+                        if (capturedContent) {
+                            ws.send(JSON.stringify({
+                                type: 'output',
+                                data: capturedContent
+                            }));
+                        }
+
+                        // Spawn node-pty attached to tmux
+                        const termCols = data.cols || 120;
+                        const termRows = data.rows || 30;
+                        shellProcess = pty.spawn('tmux', ['attach-session', '-t', tmuxId], {
+                            name: 'xterm-256color',
+                            cols: termCols,
+                            rows: termRows,
+                            env: {
+                                ...process.env,
+                                TERM: 'xterm-256color',
+                                COLORTERM: 'truecolor',
+                                FORCE_COLOR: '3'
+                            }
+                        });
+
+                        console.log(`🐚 Tmux PTY attached to session ${tmuxId}, PID: ${shellProcess.pid}`);
+
+                        ptySessionsMap.set(ptySessionKey, {
+                            pty: shellProcess,
+                            ws: ws,
+                            buffer: [],
+                            timeoutId: null,
+                            projectPath: data.projectPath,
+                            sessionId: tmuxId,
+                            isTmux: true
+                        });
+
+                        // Handle data output from tmux
+                        shellProcess.onData((output) => {
+                            const session = ptySessionsMap.get(ptySessionKey);
+                            if (!session) return;
+
+                            if (session.ws && session.ws.readyState === WebSocket.OPEN) {
+                                session.ws.send(JSON.stringify({
+                                    type: 'output',
+                                    data: output
+                                }));
+                            }
+                        });
+
+                        // Handle PTY exit (tmux detach or tmux session killed)
+                        shellProcess.onExit((exitInfo) => {
+                            console.log(`🔚 Tmux PTY detached from ${tmuxId}, code: ${exitInfo.exitCode}`);
+                            ptySessionsMap.delete(ptySessionKey);
+                            shellProcess = null;
+                        });
+
+                        // Update last activity in database
+                        try {
+                            const { terminalSessionsDb } = await import('./database/db.js');
+                            terminalSessionsDb.updateLastActivity(tmuxId);
+                        } catch {}
+
+                    } catch (tmuxErr) {
+                        console.error('[ERROR] Tmux session error:', tmuxErr);
+                        ws.send(JSON.stringify({
+                            type: 'output',
+                            data: `\r\n\x1b[31mError attaching to tmux session: ${tmuxErr.message}\x1b[0m\r\n`
+                        }));
+                    }
+
+                    return;
+                }
+
                 // Login commands (Claude/Cursor auth) should never reuse cached sessions
                 const isLoginCommand = initialCommand && (
                     initialCommand.includes('setup-token') ||
@@ -1943,16 +2093,27 @@ function handleShellConnection(ws) {
         if (ptySessionKey) {
             const session = ptySessionsMap.get(ptySessionKey);
             if (session) {
-                console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', ptySessionKey);
-                session.ws = null;
-
-                session.timeoutId = setTimeout(() => {
-                    console.log('⏰ PTY session timeout, killing process:', ptySessionKey);
+                if (session.isTmux) {
+                    // For tmux sessions: kill the PTY attachment immediately
+                    // The tmux session itself persists independently
+                    console.log('🐚 Tmux PTY detaching (tmux session persists):', ptySessionKey);
                     if (session.pty && session.pty.kill) {
-                        session.pty.kill();
+                        try { session.pty.kill(); } catch {}
                     }
                     ptySessionsMap.delete(ptySessionKey);
-                }, PTY_SESSION_TIMEOUT);
+                } else {
+                    // For regular sessions: keep alive with 30-min timeout
+                    console.log('⏳ PTY session kept alive, will timeout in 30 minutes:', ptySessionKey);
+                    session.ws = null;
+
+                    session.timeoutId = setTimeout(() => {
+                        console.log('⏰ PTY session timeout, killing process:', ptySessionKey);
+                        if (session.pty && session.pty.kill) {
+                            session.pty.kill();
+                        }
+                        ptySessionsMap.delete(ptySessionKey);
+                    }, PTY_SESSION_TIMEOUT);
+                }
             }
         }
     });

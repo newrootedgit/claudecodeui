@@ -14,6 +14,7 @@ export function useShellRuntime({
   minimal,
   autoConnect,
   isRestarting,
+  tmuxSessionId,
   onProcessComplete,
   onOutputRef,
 }: UseShellRuntimeOptions): UseShellRuntimeResult {
@@ -30,6 +31,7 @@ export function useShellRuntime({
   const initialCommandRef = useRef(initialCommand);
   const isPlainShellRef = useRef(isPlainShell);
   const onProcessCompleteRef = useRef(onProcessComplete);
+  const tmuxSessionIdRef = useRef(tmuxSessionId);
   const authUrlRef = useRef('');
   const lastSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
 
@@ -40,7 +42,8 @@ export function useShellRuntime({
     initialCommandRef.current = initialCommand;
     isPlainShellRef.current = isPlainShell;
     onProcessCompleteRef.current = onProcessComplete;
-  }, [selectedProject, selectedSession, initialCommand, isPlainShell, onProcessComplete]);
+    tmuxSessionIdRef.current = tmuxSessionId;
+  }, [selectedProject, selectedSession, initialCommand, isPlainShell, onProcessComplete, tmuxSessionId]);
 
   const setCurrentAuthUrl = useCallback((nextAuthUrl: string) => {
     authUrlRef.current = nextAuthUrl;
@@ -114,6 +117,7 @@ export function useShellRuntime({
     initialCommandRef,
     isPlainShellRef,
     onProcessCompleteRef,
+    tmuxSessionIdRef,
     isInitialized,
     autoConnect,
     closeSocket,

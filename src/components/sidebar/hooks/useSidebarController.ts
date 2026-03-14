@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import type { TFunction } from 'i18next';
 import { api } from '../../../utils/api';
+import { terminalApi, type TerminalSession } from '../../../utils/terminalApi';
 import type { Project, ProjectSession, SessionProvider } from '../../../types/app';
 import type {
   AdditionalSessionsByProject,
@@ -118,6 +119,11 @@ export function useSidebarController({
   const searchSeqRef = useRef(0);
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  const [terminalSessions, setTerminalSessions] = useState<Record<string, TerminalSession[]>>({});
+  const [selectedTerminalSessionId, setSelectedTerminalSessionId] = useState<string | null>(null);
+  const [editingTerminal, setEditingTerminal] = useState<string | null>(null);
+  const [editingTerminalName, setEditingTerminalName] = useState('');
+
   const isSidebarCollapsed = !isMobile && !sidebarVisible;
 
   useEffect(() => {
@@ -146,6 +152,24 @@ export function useSidebarController({
       });
     }
   }, [selectedSession, selectedProject]);
+
+  const fetchTerminalSessions = useCallback(async (projectPath: string) => {
+    try {
+      const sessions = await terminalApi.list(projectPath);
+      setTerminalSessions(prev => ({ ...prev, [projectPath]: sessions }));
+    } catch (error) {
+      console.error('[Sidebar] Error fetching terminal sessions:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    for (const projectName of expandedProjects) {
+      const project = projects.find(p => p.name === projectName);
+      if (project?.fullPath) {
+        void fetchTerminalSessions(project.fullPath);
+      }
+    }
+  }, [expandedProjects, projects, fetchTerminalSessions]);
 
   useEffect(() => {
     if (projects.length > 0 && !isLoading) {
@@ -571,6 +595,100 @@ export function useSidebarController({
     [onRefresh, t],
   );
 
+  const getTerminalSessionsForProject = useCallback(
+    (project: Project) => terminalSessions[project.fullPath] || [],
+    [terminalSessions],
+  );
+
+  const handleTerminalSelect = useCallback(
+    (terminal: TerminalSession) => {
+      setSelectedTerminalSessionId(terminal.sessionId);
+      onSessionSelect({ id: terminal.sessionId, __provider: 'claude' as const, __terminalSession: terminal } as ProjectSession);
+    },
+    [onSessionSelect],
+  );
+
+  const handleNewTerminal = useCallback(
+    async (project: Project) => {
+      try {
+        const projectPath = project.fullPath || project.path || '';
+        const existingCount = (terminalSessions[projectPath] || []).length;
+        const name = existingCount === 0 ? 'Terminal' : `Terminal ${existingCount + 1}`;
+        const newSession = await terminalApi.create(projectPath, name);
+        setTerminalSessions(prev => ({
+          ...prev,
+          [projectPath]: [newSession, ...(prev[projectPath] || [])],
+        }));
+        setSelectedTerminalSessionId(newSession.sessionId);
+        // Signal to parent that a terminal was selected
+        onSessionSelect({ id: newSession.sessionId, __provider: 'claude' as const, __terminalSession: newSession } as ProjectSession);
+      } catch (error) {
+        console.error('[Sidebar] Error creating terminal session:', error);
+      }
+    },
+    [terminalSessions, onSessionSelect],
+  );
+
+  const handleTerminalDelete = useCallback(
+    async (sessionId: string) => {
+      try {
+        await terminalApi.delete(sessionId);
+        setTerminalSessions(prev => {
+          const updated = { ...prev };
+          for (const key of Object.keys(updated)) {
+            updated[key] = updated[key].filter(s => s.sessionId !== sessionId);
+          }
+          return updated;
+        });
+        if (selectedTerminalSessionId === sessionId) {
+          setSelectedTerminalSessionId(null);
+        }
+      } catch (error) {
+        console.error('[Sidebar] Error deleting terminal session:', error);
+      }
+    },
+    [selectedTerminalSessionId],
+  );
+
+  const startEditingTerminal = useCallback((sessionId: string, currentName: string) => {
+    setEditingTerminal(sessionId);
+    setEditingTerminalName(currentName);
+  }, []);
+
+  const cancelEditingTerminal = useCallback(() => {
+    setEditingTerminal(null);
+    setEditingTerminalName('');
+  }, []);
+
+  const saveEditingTerminal = useCallback(
+    async (sessionId: string, newName: string) => {
+      const trimmed = newName.trim();
+      if (!trimmed) {
+        setEditingTerminal(null);
+        setEditingTerminalName('');
+        return;
+      }
+      try {
+        await terminalApi.rename(sessionId, trimmed);
+        setTerminalSessions(prev => {
+          const updated = { ...prev };
+          for (const key of Object.keys(updated)) {
+            updated[key] = updated[key].map(s =>
+              s.sessionId === sessionId ? { ...s, terminalName: trimmed } : s
+            );
+          }
+          return updated;
+        });
+      } catch (error) {
+        console.error('[Sidebar] Error renaming terminal:', error);
+      } finally {
+        setEditingTerminal(null);
+        setEditingTerminalName('');
+      }
+    },
+    [],
+  );
+
   const collapseSidebar = useCallback(() => {
     setSidebarVisible(false);
   }, [setSidebarVisible]);
@@ -641,5 +759,16 @@ export function useSidebarController({
     setDeleteConfirmation,
     setSessionDeleteConfirmation,
     setShowVersionModal,
+    getTerminalSessionsForProject,
+    selectedTerminalSessionId,
+    handleTerminalSelect,
+    handleNewTerminal,
+    handleTerminalDelete,
+    editingTerminal,
+    editingTerminalName,
+    setEditingTerminalName,
+    startEditingTerminal,
+    cancelEditingTerminal,
+    saveEditingTerminal,
   };
 }

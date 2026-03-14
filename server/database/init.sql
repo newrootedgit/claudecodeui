@@ -97,3 +97,19 @@ CREATE TABLE IF NOT EXISTS app_config (
     value TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Terminal sessions for persistent tmux-backed terminals
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL UNIQUE,
+  user_id INTEGER,
+  project_path TEXT NOT NULL,
+  terminal_name TEXT NOT NULL DEFAULT 'Terminal',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+  is_active BOOLEAN DEFAULT 1,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_active ON terminal_sessions(is_active);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_project ON terminal_sessions(project_path, is_active);

@@ -30,6 +30,7 @@ type ShellProps = {
   minimal?: boolean;
   autoConnect?: boolean;
   isActive?: boolean;
+  tmuxSessionId?: string | null;
 };
 
 export default function Shell({
@@ -41,6 +42,7 @@ export default function Shell({
   minimal = false,
   autoConnect = false,
   isActive = true,
+  tmuxSessionId = null,
 }: ShellProps) {
   const { t } = useTranslation('chat');
   const [isRestarting, setIsRestarting] = useState(false);
@@ -69,6 +71,7 @@ export default function Shell({
     minimal,
     autoConnect,
     isRestarting,
+    tmuxSessionId,
     onProcessComplete,
     onOutputRef,
   });

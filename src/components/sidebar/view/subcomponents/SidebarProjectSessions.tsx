@@ -1,9 +1,11 @@
-import { ChevronDown, Plus } from 'lucide-react';
+import { ChevronDown, Plus, Terminal } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { Button } from '../../../../shared/view/ui';
 import type { Project, ProjectSession, SessionProvider } from '../../../../types/app';
+import type { TerminalSession } from '../../../../utils/terminalApi';
 import type { SessionWithProvider } from '../../types/types';
 import SidebarSessionItem from './SidebarSessionItem';
+import SidebarTerminalItem from './SidebarTerminalItem';
 
 type SidebarProjectSessionsProps = {
   project: Project;
@@ -29,6 +31,17 @@ type SidebarProjectSessionsProps = {
   ) => void;
   onLoadMoreSessions: (project: Project) => void;
   onNewSession: (project: Project) => void;
+  terminalSessions: TerminalSession[];
+  selectedTerminalSessionId: string | null;
+  editingTerminal: string | null;
+  editingTerminalName: string;
+  onEditingTerminalNameChange: (value: string) => void;
+  onStartEditingTerminal: (sessionId: string, currentName: string) => void;
+  onCancelEditingTerminal: () => void;
+  onSaveEditingTerminal: (sessionId: string, newName: string) => void;
+  onTerminalSelect: (terminal: TerminalSession) => void;
+  onTerminalDelete: (sessionId: string) => void;
+  onNewTerminal: (project: Project) => void;
   t: TFunction;
 };
 
@@ -69,6 +82,17 @@ export default function SidebarProjectSessions({
   onDeleteSession,
   onLoadMoreSessions,
   onNewSession,
+  terminalSessions,
+  selectedTerminalSessionId,
+  editingTerminal,
+  editingTerminalName,
+  onEditingTerminalNameChange,
+  onStartEditingTerminal,
+  onCancelEditingTerminal,
+  onSaveEditingTerminal,
+  onTerminalSelect,
+  onTerminalDelete,
+  onNewTerminal,
   t,
 }: SidebarProjectSessionsProps) {
   if (!isExpanded) {
@@ -152,6 +176,56 @@ export default function SidebarProjectSessions({
         <Plus className="h-3 w-3" />
         {t('sessions.newSession')}
       </Button>
+
+      {/* Terminal Sessions Section */}
+      <div className="mt-3 border-t border-border/50 pt-2">
+        <div className="mb-1 flex items-center gap-1 px-1">
+          <Terminal className="h-3 w-3 text-muted-foreground" />
+          <span className="text-xs font-medium text-muted-foreground">Terminals</span>
+        </div>
+
+        {terminalSessions.length === 0 ? (
+          <div className="px-3 py-1">
+            <p className="text-xs text-muted-foreground">No terminal sessions</p>
+          </div>
+        ) : (
+          terminalSessions.map((terminal) => (
+            <SidebarTerminalItem
+              key={terminal.sessionId}
+              terminal={terminal}
+              isSelected={selectedTerminalSessionId === terminal.sessionId}
+              isEditing={editingTerminal === terminal.sessionId}
+              editingName={editingTerminalName}
+              onEditingNameChange={onEditingTerminalNameChange}
+              onStartEditing={onStartEditingTerminal}
+              onCancelEditing={onCancelEditingTerminal}
+              onSaveEditing={onSaveEditingTerminal}
+              onSelect={onTerminalSelect}
+              onDelete={onTerminalDelete}
+            />
+          ))
+        )}
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-1 hidden h-7 w-full justify-start gap-2 border-dashed text-xs text-muted-foreground transition-colors hover:text-foreground md:flex"
+          onClick={() => onNewTerminal(project)}
+        >
+          <Plus className="h-3 w-3" />
+          New Terminal
+        </Button>
+
+        <div className="px-3 pb-2 md:hidden">
+          <button
+            className="flex h-7 w-full items-center justify-center gap-2 rounded-md border border-dashed border-border text-xs font-medium text-muted-foreground transition-all duration-150 hover:text-foreground active:scale-[0.98]"
+            onClick={() => onNewTerminal(project)}
+          >
+            <Plus className="h-3 w-3" />
+            New Terminal
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

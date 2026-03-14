@@ -3,6 +3,7 @@ import type { TFunction } from 'i18next';
 import { Button } from '../../../../shared/view/ui';
 import { cn } from '../../../../lib/utils';
 import type { Project, ProjectSession, SessionProvider } from '../../../../types/app';
+import type { TerminalSession } from '../../../../utils/terminalApi';
 import type { MCPServerStatus, SessionWithProvider } from '../../types/types';
 import { getTaskIndicatorStatus } from '../../utils/utils';
 import TaskIndicator from './TaskIndicator';
@@ -46,6 +47,17 @@ type SidebarProjectItemProps = {
   onStartEditingSession: (sessionId: string, initialName: string) => void;
   onCancelEditingSession: () => void;
   onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: SessionProvider) => void;
+  terminalSessions: TerminalSession[];
+  selectedTerminalSessionId: string | null;
+  editingTerminal: string | null;
+  editingTerminalName: string;
+  onEditingTerminalNameChange: (value: string) => void;
+  onStartEditingTerminal: (sessionId: string, currentName: string) => void;
+  onCancelEditingTerminal: () => void;
+  onSaveEditingTerminal: (sessionId: string, newName: string) => void;
+  onTerminalSelect: (terminal: TerminalSession) => void;
+  onTerminalDelete: (sessionId: string) => void;
+  onNewTerminal: (project: Project) => void;
   t: TFunction;
 };
 
@@ -91,6 +103,17 @@ export default function SidebarProjectItem({
   onStartEditingSession,
   onCancelEditingSession,
   onSaveEditingSession,
+  terminalSessions,
+  selectedTerminalSessionId,
+  editingTerminal,
+  editingTerminalName,
+  onEditingTerminalNameChange,
+  onStartEditingTerminal,
+  onCancelEditingTerminal,
+  onSaveEditingTerminal,
+  onTerminalSelect,
+  onTerminalDelete,
+  onNewTerminal,
   t,
 }: SidebarProjectItemProps) {
   const isSelected = selectedProject?.name === project.name;
@@ -422,6 +445,17 @@ export default function SidebarProjectItem({
         onDeleteSession={onDeleteSession}
         onLoadMoreSessions={onLoadMoreSessions}
         onNewSession={onNewSession}
+        terminalSessions={terminalSessions}
+        selectedTerminalSessionId={selectedTerminalSessionId}
+        editingTerminal={editingTerminal}
+        editingTerminalName={editingTerminalName}
+        onEditingTerminalNameChange={onEditingTerminalNameChange}
+        onStartEditingTerminal={onStartEditingTerminal}
+        onCancelEditingTerminal={onCancelEditingTerminal}
+        onSaveEditingTerminal={onSaveEditingTerminal}
+        onTerminalSelect={onTerminalSelect}
+        onTerminalDelete={onTerminalDelete}
+        onNewTerminal={onNewTerminal}
         t={t}
       />
     </div>

@@ -19,6 +19,7 @@ type UseShellConnectionOptions = {
   initialCommandRef: MutableRefObject<string | null | undefined>;
   isPlainShellRef: MutableRefObject<boolean>;
   onProcessCompleteRef: MutableRefObject<((exitCode: number) => void) | null | undefined>;
+  tmuxSessionIdRef: MutableRefObject<string | null | undefined>;
   isInitialized: boolean;
   autoConnect: boolean;
   closeSocket: () => void;
@@ -44,6 +45,7 @@ export function useShellConnection({
   initialCommandRef,
   isPlainShellRef,
   onProcessCompleteRef,
+  tmuxSessionIdRef,
   isInitialized,
   autoConnect,
   closeSocket,
@@ -152,6 +154,7 @@ export function useShellConnection({
               rows: currentTerminal.rows,
               initialCommand: initialCommandRef.current,
               isPlainShell: isPlainShellRef.current,
+              tmuxSessionId: tmuxSessionIdRef.current || null,
             });
           }, TERMINAL_INIT_DELAY_MS);
         };
@@ -191,6 +194,7 @@ export function useShellConnection({
       selectedSessionRef,
       setAuthUrl,
       terminalRef,
+      tmuxSessionIdRef,
       wsRef,
     ],
   );

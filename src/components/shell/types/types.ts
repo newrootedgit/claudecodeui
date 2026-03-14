@@ -15,6 +15,7 @@ export type ShellInitMessage = {
   rows: number;
   initialCommand: string | null | undefined;
   isPlainShell: boolean;
+  tmuxSessionId?: string | null;
 };
 
 export type ShellResizeMessage = {
@@ -44,6 +45,7 @@ export type UseShellRuntimeOptions = {
   minimal: boolean;
   autoConnect: boolean;
   isRestarting: boolean;
+  tmuxSessionId?: string | null;
   onProcessComplete?: ((exitCode: number) => void) | null;
   onOutputRef?: MutableRefObject<(() => void) | null>;
 };

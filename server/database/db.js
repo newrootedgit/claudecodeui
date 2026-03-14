@@ -148,6 +148,21 @@ const runMigrations = () => {
     )`);
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_names_lookup ON session_names(session_id, provider)');
 
+    // Create terminal_sessions table if it doesn't exist
+    db.exec(`CREATE TABLE IF NOT EXISTS terminal_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL UNIQUE,
+      user_id INTEGER,
+      project_path TEXT NOT NULL,
+      terminal_name TEXT NOT NULL DEFAULT 'Terminal',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+      is_active BOOLEAN DEFAULT 1,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_terminal_sessions_active ON terminal_sessions(is_active)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_terminal_sessions_project ON terminal_sessions(project_path, is_active)');
+
     console.log('Database migrations completed successfully');
   } catch (error) {
     console.error('Error running migrations:', error.message);
@@ -596,6 +611,83 @@ const appConfigDb = {
   }
 };
 
+// Terminal sessions database operations
+const terminalSessionsDb = {
+  createSession: (sessionId, userId, projectPath, terminalName = 'Terminal') => {
+    try {
+      const stmt = db.prepare(
+        'INSERT INTO terminal_sessions (session_id, user_id, project_path, terminal_name) VALUES (?, ?, ?, ?)'
+      );
+      const result = stmt.run(sessionId, userId, projectPath, terminalName);
+      return { id: result.lastInsertRowid, sessionId, projectPath, terminalName };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  getSessions: (projectPath) => {
+    try {
+      return db.prepare(
+        'SELECT session_id, project_path, terminal_name, created_at, last_activity FROM terminal_sessions WHERE project_path = ? AND is_active = 1 ORDER BY created_at DESC'
+      ).all(projectPath);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  getAllSessions: () => {
+    try {
+      return db.prepare(
+        'SELECT session_id, project_path, terminal_name, created_at, last_activity FROM terminal_sessions WHERE is_active = 1 ORDER BY created_at DESC'
+      ).all();
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  getSession: (sessionId) => {
+    try {
+      return db.prepare(
+        'SELECT session_id, project_path, terminal_name, created_at, last_activity FROM terminal_sessions WHERE session_id = ? AND is_active = 1'
+      ).get(sessionId);
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  renameSession: (sessionId, newName) => {
+    try {
+      const stmt = db.prepare(
+        'UPDATE terminal_sessions SET terminal_name = ? WHERE session_id = ? AND is_active = 1'
+      );
+      return stmt.run(newName, sessionId).changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  updateLastActivity: (sessionId) => {
+    try {
+      db.prepare(
+        'UPDATE terminal_sessions SET last_activity = CURRENT_TIMESTAMP WHERE session_id = ?'
+      ).run(sessionId);
+    } catch (err) {
+      console.warn('Failed to update terminal last activity:', err.message);
+    }
+  },
+
+  deleteSession: (sessionId) => {
+    try {
+      const stmt = db.prepare(
+        'UPDATE terminal_sessions SET is_active = 0 WHERE session_id = ?'
+      );
+      return stmt.run(sessionId).changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+};
+
 // Backward compatibility - keep old names pointing to new system
 const githubTokensDb = {
   createGithubToken: (userId, tokenName, githubToken, description = null) => {
@@ -626,5 +718,6 @@ export {
   sessionNamesDb,
   applyCustomSessionNames,
   appConfigDb,
-  githubTokensDb // Backward compatibility
+  githubTokensDb, // Backward compatibility
+  terminalSessionsDb
 };

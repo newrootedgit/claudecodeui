@@ -146,6 +146,7 @@ export function useProjectsState({
     }
   }, [activeTab]);
 
+  const [selectedTerminalId, setSelectedTerminalId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null);
@@ -386,6 +387,7 @@ export function useProjectsState({
 
   const handleSessionSelect = useCallback(
     (session: ProjectSession) => {
+      setSelectedTerminalId(null);
       setSelectedSession(session);
 
       if (activeTab === 'tasks' || activeTab === 'preview') {
@@ -568,5 +570,7 @@ export function useProjectsState({
     handleSessionDelete,
     handleProjectDelete,
     handleSidebarRefresh,
+    selectedTerminalId,
+    setSelectedTerminalId,
   };
 }
