@@ -34,6 +34,7 @@ export function useShellRuntime({
   const tmuxSessionIdRef = useRef(tmuxSessionId);
   const authUrlRef = useRef('');
   const lastSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const lastTmuxSessionIdRef = useRef<string | null | undefined>(tmuxSessionId);
 
   // Keep mutable values in refs so websocket handlers always read current data.
   useEffect(() => {
@@ -152,6 +153,14 @@ export function useShellRuntime({
 
     lastSessionIdRef.current = currentSessionId;
   }, [disconnectFromShell, isInitialized, selectedSession?.id]);
+
+  // Reconnect when tmux session changes (e.g. switching between terminal sidebar items)
+  useEffect(() => {
+    if (lastTmuxSessionIdRef.current !== tmuxSessionId && isInitialized) {
+      disconnectFromShell();
+    }
+    lastTmuxSessionIdRef.current = tmuxSessionId;
+  }, [disconnectFromShell, isInitialized, tmuxSessionId]);
 
   return {
     terminalContainerRef,
