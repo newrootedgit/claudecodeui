@@ -1745,6 +1745,8 @@ function handleShellConnection(ws) {
                         shellProcess.onData((output) => {
                             const session = ptySessionsMap.get(ptySessionKey);
                             if (!session) return;
+                            // Only forward output if this PTY still owns the map entry
+                            if (session.connectionId !== connectionId) return;
 
                             if (session.ws && session.ws.readyState === WebSocket.OPEN) {
                                 session.ws.send(JSON.stringify({
@@ -1757,7 +1759,10 @@ function handleShellConnection(ws) {
                         // Handle PTY exit (tmux detach or tmux session killed)
                         shellProcess.onExit((exitInfo) => {
                             console.log(`🔚 Tmux PTY detached from ${tmuxId}, code: ${exitInfo.exitCode}`);
-                            ptySessionsMap.delete(ptySessionKey);
+                            const exitSession = ptySessionsMap.get(ptySessionKey);
+                            if (exitSession && exitSession.connectionId === connectionId) {
+                                ptySessionsMap.delete(ptySessionKey);
+                            }
                             shellProcess = null;
                         });
 
