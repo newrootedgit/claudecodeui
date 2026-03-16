@@ -1666,17 +1666,29 @@ function handleShellConnection(ws) {
 
                     // Check if we already have a node-pty attachment for this tmux session
                     const existingTmux = ptySessionsMap.get(ptySessionKey);
-                    if (existingTmux) {
-                        // Disconnect previous WebSocket if any
+                    if (existingTmux && existingTmux.pty) {
+                        // Reuse existing PTY — just swap the WebSocket reference
                         if (existingTmux.ws && existingTmux.ws !== ws && existingTmux.ws.readyState === WebSocket.OPEN) {
                             existingTmux.ws.close();
                         }
-                        // Kill existing PTY attachment to re-attach cleanly
-                        if (existingTmux.pty && existingTmux.pty.kill) {
-                            try { existingTmux.pty.kill(); } catch {}
-                        }
-                        if (existingTmux.timeoutId) clearTimeout(existingTmux.timeoutId);
-                        ptySessionsMap.delete(ptySessionKey);
+                        existingTmux.ws = ws;
+                        existingTmux.connectionId = connectionId;
+                        shellProcess = existingTmux.pty;
+
+                        // Send captured pane content for visual restore
+                        try {
+                            const { execSync } = await import('child_process');
+                            const capturedContent = execSync(
+                                `tmux capture-pane -p -t "${tmuxId}" -S -5000`,
+                                { encoding: 'utf-8', maxBuffer: 5 * 1024 * 1024 }
+                            );
+                            if (capturedContent) {
+                                ws.send(JSON.stringify({ type: 'output', data: capturedContent }));
+                            }
+                        } catch {}
+
+                        console.log('♻️  Reconnected WebSocket to existing tmux PTY:', ptySessionKey);
+                        return;
                     }
 
                     // Ensure tmux session exists
