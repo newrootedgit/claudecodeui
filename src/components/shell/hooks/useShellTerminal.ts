@@ -135,6 +135,41 @@ export function useShellTerminal({
 
     terminalContainerRef.current.addEventListener('copy', handleTerminalCopy);
 
+    // Paste handler — works on HTTP (reads from paste event's clipboardData)
+    const handleTerminalPaste = (event: ClipboardEvent) => {
+      event.preventDefault();
+      const text = event.clipboardData?.getData('text/plain') || event.clipboardData?.getData('text') || '';
+      if (text) {
+        sendSocketMessage(wsRef.current, {
+          type: 'input',
+          data: text,
+        });
+      }
+    };
+    terminalContainerRef.current.addEventListener('paste', handleTerminalPaste);
+
+    // Right-click paste — try clipboard API, otherwise let browser context menu show
+    const handleContextMenu = (event: MouseEvent) => {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+        event.preventDefault();
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) {
+              sendSocketMessage(wsRef.current, {
+                type: 'input',
+                data: text,
+              });
+            }
+          })
+          .catch(() => {
+            // Clipboard API not available on HTTP — browser menu will show on next right-click
+          });
+      }
+      // On HTTP without clipboard API: don't preventDefault, browser context menu appears
+    };
+    terminalContainerRef.current.addEventListener('contextmenu', handleContextMenu);
+
     nextTerminal.attachCustomKeyEventHandler((event) => {
       const activeAuthUrl = isCodexLoginCommand(initialCommandRef.current)
         ? CODEX_DEVICE_AUTH_URL
@@ -173,11 +208,10 @@ export function useShellTerminal({
         (event.ctrlKey || event.metaKey) &&
         event.key?.toLowerCase() === 'v'
       ) {
-        // Block native paste so data is only injected after clipboard-read resolves.
-        event.preventDefault();
-        event.stopPropagation();
-
+        // Try async clipboard API first (works on HTTPS/localhost)
         if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+          event.preventDefault();
+          event.stopPropagation();
           navigator.clipboard
             .readText()
             .then((text) => {
@@ -186,10 +220,15 @@ export function useShellTerminal({
                 data: text,
               });
             })
-            .catch(() => {});
+            .catch(() => {
+              // Clipboard API failed (likely HTTP) — trigger native paste as fallback
+              document.execCommand('paste');
+            });
+          return false;
         }
-
-        return false;
+        // No clipboard API — let the browser handle paste natively.
+        // xterm's hidden textarea will receive the pasted text via onData.
+        return true;
       }
 
       return true;
@@ -244,6 +283,8 @@ export function useShellTerminal({
 
     return () => {
       terminalContainerRef.current?.removeEventListener('copy', handleTerminalCopy);
+      terminalContainerRef.current?.removeEventListener('paste', handleTerminalPaste);
+      terminalContainerRef.current?.removeEventListener('contextmenu', handleContextMenu);
       resizeObserver.disconnect();
       if (resizeTimeoutRef.current !== null) {
         window.clearTimeout(resizeTimeoutRef.current);
