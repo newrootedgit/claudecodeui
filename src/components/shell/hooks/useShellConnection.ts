@@ -125,6 +125,15 @@ export function useShellConnection({
 
         connectingRef.current = true;
 
+        // Close previous socket before creating new one to avoid stale onclose races
+        if (wsRef.current) {
+          const old = wsRef.current;
+          wsRef.current = null;
+          if (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING) {
+            old.close();
+          }
+        }
+
         const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
 
@@ -165,6 +174,10 @@ export function useShellConnection({
         };
 
         socket.onclose = () => {
+          // Only react if this is still the active socket — stale sockets
+          // (replaced by a newer connection) must not reset shared state,
+          // otherwise the auto-connect effect creates an infinite reconnect loop.
+          if (wsRef.current !== socket) return;
           setIsConnected(false);
           setIsConnecting(false);
           connectingRef.current = false;
@@ -172,6 +185,7 @@ export function useShellConnection({
         };
 
         socket.onerror = () => {
+          if (wsRef.current !== socket) return;
           setIsConnected(false);
           setIsConnecting(false);
           connectingRef.current = false;
