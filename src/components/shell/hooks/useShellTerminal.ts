@@ -148,25 +148,9 @@ export function useShellTerminal({
     };
     terminalContainerRef.current.addEventListener('paste', handleTerminalPaste);
 
-    // Right-click paste — try clipboard API, otherwise let browser context menu show
+    // Right-click: suppress browser context menu so only tmux's menu shows (no double menus).
     const handleContextMenu = (event: MouseEvent) => {
-      if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-        event.preventDefault();
-        navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (text) {
-              sendSocketMessage(wsRef.current, {
-                type: 'input',
-                data: text,
-              });
-            }
-          })
-          .catch(() => {
-            // Clipboard API not available on HTTP — browser menu will show on next right-click
-          });
-      }
-      // On HTTP without clipboard API: don't preventDefault, browser context menu appears
+      event.preventDefault();
     };
     terminalContainerRef.current.addEventListener('contextmenu', handleContextMenu);
 
@@ -203,31 +187,13 @@ export function useShellTerminal({
         return false;
       }
 
+      // Ctrl+V: let the browser handle paste natively.
+      // The paste event is caught by handleTerminalPaste (works on both HTTP and HTTPS).
       if (
         event.type === 'keydown' &&
         (event.ctrlKey || event.metaKey) &&
         event.key?.toLowerCase() === 'v'
       ) {
-        // Try async clipboard API first (works on HTTPS/localhost)
-        if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
-          event.preventDefault();
-          event.stopPropagation();
-          navigator.clipboard
-            .readText()
-            .then((text) => {
-              sendSocketMessage(wsRef.current, {
-                type: 'input',
-                data: text,
-              });
-            })
-            .catch(() => {
-              // Clipboard API failed (likely HTTP) — trigger native paste as fallback
-              document.execCommand('paste');
-            });
-          return false;
-        }
-        // No clipboard API — let the browser handle paste natively.
-        // xterm's hidden textarea will receive the pasted text via onData.
         return true;
       }
 
