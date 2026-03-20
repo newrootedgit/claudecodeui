@@ -135,19 +135,6 @@ export function useShellTerminal({
 
     terminalContainerRef.current.addEventListener('copy', handleTerminalCopy);
 
-    // Paste handler — works on HTTP (reads from paste event's clipboardData)
-    const handleTerminalPaste = (event: ClipboardEvent) => {
-      event.preventDefault();
-      const text = event.clipboardData?.getData('text/plain') || event.clipboardData?.getData('text') || '';
-      if (text) {
-        sendSocketMessage(wsRef.current, {
-          type: 'input',
-          data: text,
-        });
-      }
-    };
-    terminalContainerRef.current.addEventListener('paste', handleTerminalPaste);
-
     // Right-click: suppress browser context menu so only tmux's menu shows (no double menus).
     const handleContextMenu = (event: MouseEvent) => {
       event.preventDefault();
@@ -187,14 +174,14 @@ export function useShellTerminal({
         return false;
       }
 
-      // Ctrl+V: let the browser handle paste natively.
-      // The paste event is caught by handleTerminalPaste (works on both HTTP and HTTPS).
+      // Ctrl+V: return false so xterm does NOT process the key (which would send  and
+      // preventDefault). The browser's default paste fires, xterm catches it via its own paste handler.
       if (
         event.type === 'keydown' &&
         (event.ctrlKey || event.metaKey) &&
         event.key?.toLowerCase() === 'v'
       ) {
-        return true;
+        return false; // Prevent xterm sending ; browser paste event fires and xterm handles it natively
       }
 
       return true;
@@ -249,7 +236,7 @@ export function useShellTerminal({
 
     return () => {
       terminalContainerRef.current?.removeEventListener('copy', handleTerminalCopy);
-      terminalContainerRef.current?.removeEventListener('paste', handleTerminalPaste);
+
       terminalContainerRef.current?.removeEventListener('contextmenu', handleContextMenu);
       resizeObserver.disconnect();
       if (resizeTimeoutRef.current !== null) {
