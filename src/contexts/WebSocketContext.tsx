@@ -33,6 +33,7 @@ const useWebSocketProviderState = (): WebSocketContextType => {
   const [latestMessage, setLatestMessage] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { token } = useAuth();
 
   useEffect(() => {
@@ -40,6 +41,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
     
     return () => {
       unmountedRef.current = true;
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
@@ -67,11 +71,22 @@ const useWebSocketProviderState = (): WebSocketContextType => {
           setLatestMessage({ type: 'websocket-reconnected', timestamp: Date.now() });
         }
         hasConnectedRef.current = true;
+
+        // Application-level keepalive: send ping every 30s to prevent
+        // Cloudflare Tunnel from closing idle WebSocket connections.
+        if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = setInterval(() => {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30_000);
       };
 
       websocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          // Ignore keepalive pong responses — they should not trigger re-renders
+          if (data.type === 'pong') return;
           setLatestMessage(data);
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -81,6 +96,10 @@ const useWebSocketProviderState = (): WebSocketContextType => {
       websocket.onclose = () => {
         setIsConnected(false);
         wsRef.current = null;
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
         
         // Attempt to reconnect after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
