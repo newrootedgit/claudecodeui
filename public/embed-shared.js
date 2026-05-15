@@ -48,6 +48,13 @@ window.addEventListener('unhandledrejection', function(ev) {
         _reconnectAttempts: 0,
         _reconnectTimer: null,
         _initialized: false,
+        // Bug fix: after a switch-session, the server may still emit late
+        // claude-response / claude-error / claude-complete events for the previous
+        // session's claude subprocess (which died on WS-close). Those leak into the
+        // NEW session's UI as bogus "Error: Claude Code process exited with code 1".
+        // Suppress those events for 2 seconds after a switch — long enough for the
+        // server's in-flight stream to drain. Cleared on send-message.
+        _suppressIncomingUntil: 0,
 
         /**
          * Initialize the embed shared layer.
@@ -107,7 +114,10 @@ window.addEventListener('unhandledrejection', function(ev) {
                     this.sessionId = msg.sessionId || null;
                     this.context = msg.context || this.context;
                     this.estimatedTokens = 0;
-                    try { console.log('[EmbedShared] switch-session', { sessionId: this.sessionId, loadHistory: msg.loadHistory }); } catch(e) {}
+                    // Drop late events from the previous session's claude subprocess
+                    // for 2s. See _suppressIncomingUntil comment above.
+                    this._suppressIncomingUntil = Date.now() + 2000;
+                    try { console.log('[EmbedShared] switch-session', { sessionId: this.sessionId, loadHistory: msg.loadHistory, suppressMs: 2000 }); } catch(e) {}
 
                     // Clear display via handler
                     if (this.handlers.onClearMessages) {
@@ -128,6 +138,9 @@ window.addEventListener('unhandledrejection', function(ev) {
 
                 case 'send-message':
                     // Parent-driven send: text + optional images. Display user bubble + ship to WS.
+                    // Clear suppression — user is explicitly sending, so any incoming
+                    // events are wanted (and a fresh send precludes leakage from old session).
+                    this._suppressIncomingUntil = 0;
                     var sendText = typeof msg.text === 'string' ? msg.text : '';
                     var sendImages = Array.isArray(msg.images) ? msg.images : undefined;
                     if (this.handlers.onUserMessage) {
@@ -228,6 +241,17 @@ window.addEventListener('unhandledrejection', function(ev) {
                     });
                     // Don't forward token-budget to page handler — it's a meta event
                     return;
+                }
+
+                // Drop late events from a just-switched-away session. These types
+                // are stream-bound (one in-flight claude-command can emit multiple).
+                // Other types (e.g. system-init) pass through.
+                if (Date.now() < self._suppressIncomingUntil) {
+                    var leakTypes = ['claude-response', 'claude-complete', 'claude-error', 'claude-permission-request'];
+                    if (leakTypes.indexOf(data.type) !== -1) {
+                        try { console.log('[EmbedShared] suppressing late event from previous session', { type: data.type, msLeft: self._suppressIncomingUntil - Date.now() }); } catch(e) {}
+                        return;
+                    }
                 }
 
                 // Forward to page handler
