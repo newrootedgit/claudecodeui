@@ -91,6 +91,14 @@ html, body {
     overflow-wrap: break-word;
     font-size: 14px;
     line-height: 1.55;
+    /* BUG-11 fix: clip and scroll truly long messages instead of letting them
+       fill the screen. The .msg-body wrapper is what scrolls; .msg-time stays put.
+       60vh keeps even pathological 10k-char dumps to a manageable height. */
+    max-height: 60vh;
+    overflow-y: auto;
+}
+.msg .msg-body {
+    overflow-wrap: break-word;
 }
 .msg p { margin-bottom: 8px; }
 .msg p:last-child { margin-bottom: 0; }

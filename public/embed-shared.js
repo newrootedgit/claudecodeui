@@ -143,6 +143,15 @@ window.addEventListener('unhandledrejection', function(ev) {
                     this._suppressIncomingUntil = 0;
                     var sendText = typeof msg.text === 'string' ? msg.text : '';
                     var sendImages = Array.isArray(msg.images) ? msg.images : undefined;
+                    // BUG-10 fix: don't ship empty/whitespace-only messages to the API.
+                    // The Anthropic API rejects these with 400 "cache_control cannot be set
+                    // for empty text" and the error sticks in the chat history. Caller (parent)
+                    // is supposed to validate, but defend here too since the parent's
+                    // ChatEmbed.sendMessage doesn't.
+                    if (sendText.trim() === '' && (!sendImages || sendImages.length === 0)) {
+                        try { console.log('[EmbedShared] send-message ignored — empty text and no images'); } catch(e) {}
+                        break;
+                    }
                     if (this.handlers.onUserMessage) {
                         try { this.handlers.onUserMessage(sendText, sendImages); } catch (e) {}
                     }
