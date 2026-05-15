@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chat Embed</title>
+    <link rel="stylesheet" href="embed-shared.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <style>
+        /* Page-specific layout */
+        body {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+    <!-- Connecting overlay -->
+    <div id="connectOverlay" class="connecting-overlay">
+        <div class="spinner"></div>
+        <div class="status-text">Waiting for connection...</div>
+    </div>
+
+    <!-- Activity bar -->
+    <div id="activityBar" class="activity-bar" style="display:none">
+        <div class="activity-spinner"></div>
+        <span id="activityText">Working...</span>
+    </div>
+
+    <!-- Messages area -->
+    <div id="messages" class="chat-messages"></div>
+
+    <!-- Image preview area -->
+    <div id="imagePreviews" class="image-previews"></div>
+
+    <!-- Input area -->
+    <div class="input-area">
+        <textarea id="chatInput" placeholder="Type a message... (Ctrl+V to paste images)" rows="1" disabled></textarea>
+        <button id="sendBtn" disabled>Send</button>
+    </div>
+
+    <script src="embed-shared.js"></script>
+    <script>
+        (function() {
+            'use strict';
+
+            // DOM refs
+            var messagesDiv = document.getElementById('messages');
+            var inputEl = document.getElementById('chatInput');
+            var sendBtn = document.getElementById('sendBtn');
+            var activityBar = document.getElementById('activityBar');
+            var connectOverlay = document.getElementById('connectOverlay');
+            var imagePreviewsEl = document.getElementById('imagePreviews');
+
+            // State
+            var images = [];
+            var isStreaming = false;
+            var streamingEl = null;
+            var streamingContent = '';
+            // Queue of messages typed while a response is streaming. Each entry
+            // is { text, images }. Drained in finalizeStreaming() — one per
+            // streaming cycle, so a stack of queued questions sends sequentially
+            // without firing concurrent SDK requests on the same session.
+            var pendingMessages = [];
+
+            // Configure marked for safe rendering
+            if (typeof marked !== 'undefined') {
+                marked.setOptions({
+                    breaks: true,
+                    gfm: true
+                });
+            }
+
+            // Initialize EmbedShared
+            EmbedShared.init({
+                onMessage: handleMessage,
+                onConnect: function() {
+                    connectOverlay.style.display = 'none';
+                    inputEl.disabled = false;
+                    sendBtn.disabled = false;
+                    inputEl.focus();
+                },
+                onDisconnect: function() {
+                    connectOverlay.querySelector('.status-text').textContent = 'Reconnecting...';
+                    connectOverlay.style.display = 'flex';
+                    inputEl.disabled = true;
+                    sendBtn.disabled = true;
+                    // Drop in-flight + queued state — the SDK session is gone.
+                    isStreaming = false;
+                    streamingEl = null;
+                    streamingContent = '';
+                    if (pendingMessages.length > 0) {
+                        appendMsg('system', 'Connection lost — ' + pendingMessages.length + ' queued message(s) dropped.');
+                        pendingMessages = [];
+                    }
+                    updateQueuedBadge();
+                },
+                onSessionCreated: function(sessionId) {
+                    // Parent is notified by embed-shared automatically
+                },
+                onClearMessages: function() {
+                    messagesDiv.innerHTML = '';
+                    isStreaming = false;
+                    streamingEl = null;
+                    streamingContent = '';
+                    images = [];
+                    imagePreviewsEl.innerHTML = '';
+                    pendingMessages = [];
+                    updateQueuedBadge();
+                },
+                onHistoryLoaded: function(msgs) {
+                    renderHistory(msgs);
+                },
+                onUserMessage: function(text, imgs) {
+                    // Parent-driven send: render the user bubble here
+                    appendMsg('user', text || '(image)');
+                    setActivity('Thinking...');
+                    scrollToBottom();
+                },
+                onFocus: function() {
+                    inputEl.focus();
+                },
+                onError: function(error) {
+                    appendMsg('system', 'Error: ' + error);
+                }
+            });
+
+            // --- Message Handling ---
+
+            // Tracks last assistant completion text so claude-complete can relay it to parent (car-mode TTS etc)
+            var lastAssistantText = '';
+
+            function handleMessage(data) {
+                if (!data) return;
+
+                if (data.type === 'claude-response') {
+                    // Server wraps SDK messages as { type:'claude-response', data: <sdk message> }.
+                    // The Claude Agent SDK emits:
+                    //   { type:'assistant', message: { role:'assistant', content:[{type:'text',text},{type:'tool_use',...},{type:'thinking',...}] } }
+                    //   { type:'user',      message: { role:'user',      content:[{type:'tool_result',...}] } }  // tool results (skip)
+                    //   { type:'system',    subtype:'init', session_id, ... }
+                    //   { type:'result',    subtype:'success', result:'...final text...' }
+                    // (content_block_delta is Anthropic raw streaming; the SDK path here does NOT emit it — don't rely on it.)
+                    var sdk = data.data || {};
+
+                    // Unwrap inner message if present (matches React app: messageData = data.message || data)
+                    var inner = (sdk && sdk.message && typeof sdk.message === 'object') ? sdk.message : sdk;
+
+                    // System init — silently ignore (session-created already handled by embed-shared)
+                    if (sdk.type === 'system') {
+                        return;
+                    }
+
+                    // User-role SDK messages carry tool_result blocks — don't render as user input
+                    if (sdk.type === 'user') {
+                        return;
+                    }
+
+                    // Result message — final text summary from SDK
+                    if (sdk.type === 'result') {
+                        var resultText = sdk.result || inner.result || inner.text || '';
+                        if (resultText && !streamingContent) {
+                            streamingContent = resultText;
+                            appendMsg('assistant', resultText);
+                        }
+                        if (resultText) lastAssistantText = resultText;
+                        finalizeStreaming();
+                        return;
+                    }
+
+                    // Assistant message — may contain multiple content blocks (thinking/text/tool_use)
+                    if (sdk.type === 'assistant' && inner && Array.isArray(inner.content)) {
+                        var textContent = '';
+                        inner.content.forEach(function(block) {
+                            if (block.type === 'text' && block.text) {
+                                textContent += block.text;
+                            } else if (block.type === 'tool_use') {
+                                appendToolCard(block.name || 'tool', block.input);
+                                setActivity('Using ' + friendlyToolName(block.name || 'tool') + '...');
+                            }
+                            // thinking/redacted_thinking blocks are silently skipped
+                        });
+                        if (textContent) {
+                            if (!isStreaming) {
+                                isStreaming = true;
+                                streamingContent = '';
+                                streamingEl = appendMsg('assistant', '');
+                                setActivity('Writing response...');
+                            }
+                            // SDK emits full assistant content per message (not delta). Append rather than replace,
+                            // since a single turn can emit multiple assistant messages (text → tool_use → text again).
+                            if (streamingContent && streamingContent.slice(-textContent.length) === textContent) {
+                                // duplicate suppression — same block re-sent
+                            } else {
+                                streamingContent += (streamingContent ? '\n\n' : '') + textContent;
+                                updateMsgContent(streamingEl, streamingContent);
+                                lastAssistantText = streamingContent;
+                            }
+                            scrollToBottom();
+                        }
+                        return;
+                    }
+
+                    return;
+                }
+
+                if (data.type === 'claude-complete') {
+                    var content = lastAssistantText || streamingContent;
+                    finalizeStreaming();
+                    EmbedShared.notifyParent('response-complete', { text: content });
+                    return;
+                }
+
+                if (data.type === 'claude-error') {
+                    appendMsg('system', 'Error: ' + (data.error || 'Unknown error'));
+                    finalizeStreaming();
+                    return;
+                }
+
+                if (data.type === 'claude-permission-request') {
+                    showPermissionCard(data);
+                    EmbedShared.notifyParent('permission-request', data);
+                    return;
+                }
+            }
+
+            // --- Send ---
+
+            function sendMessage() {
+                var text = inputEl.value.trim();
+                if (!text && images.length === 0) return;
+
+                // Snapshot input + clear field immediately so the user can
+                // start typing the next message right away.
+                var msgImages = images.length > 0 ? images.slice() : undefined;
+                inputEl.value = '';
+                inputEl.style.height = 'auto';
+                images = [];
+                imagePreviewsEl.innerHTML = '';
+
+                // If a response is currently streaming, queue this message and
+                // dispatch it after the current one finishes. Avoids firing a
+                // second `claude-command` on the same SDK session, which is
+                // not a supported concurrent operation server-side.
+                if (isStreaming) {
+                    var userEl = appendMsg('user', (text || '(image)') + ' …');
+                    var hintEl = appendMsg('system', 'Queued — will send after current response.');
+                    // Stash the DOM nodes on the queue entry so dispatchMessage
+                    // can flash them to "sending…" — gives the user visible
+                    // confirmation their queued turn actually went, instead of
+                    // the hint silently disappearing on dispatch.
+                    pendingMessages.push({ text: text, images: msgImages, userEl: userEl, hintEl: hintEl });
+                    updateQueuedBadge();
+                    scrollToBottom();
+                    inputEl.focus();
+                    return;
+                }
+
+                dispatchMessage(text, msgImages);
+            }
+
+            // Send a message immediately to the SDK. Marks isStreaming so any
+            // subsequent sendMessage() during the response queues instead of
+            // firing concurrently.
+            //
+            // `entry` is the optional queued-message record (with userEl/hintEl
+            // refs) — present when dispatching from the queue, absent when
+            // dispatching a fresh send. When present, we reuse the existing
+            // user bubble (strip the queued `…`) and flash the hint to
+            // "Sending…" then fade it.
+            function dispatchMessage(text, msgImages, entry) {
+                if (entry && entry.userEl) {
+                    // Reuse the queued bubble — strip the trailing " …"
+                    updateMsgContent(entry.userEl, text || '(image)');
+                } else {
+                    appendMsg('user', text || '(image)');
+                }
+                if (entry && entry.hintEl) {
+                    updateMsgContent(entry.hintEl, 'Sending…');
+                    // Fade out shortly after; survives if Claude responds quickly.
+                    setTimeout(function() {
+                        if (entry.hintEl && entry.hintEl.parentNode) {
+                            entry.hintEl.style.transition = 'opacity 0.4s';
+                            entry.hintEl.style.opacity = '0';
+                            setTimeout(function() {
+                                if (entry.hintEl && entry.hintEl.parentNode) {
+                                    entry.hintEl.parentNode.removeChild(entry.hintEl);
+                                }
+                            }, 450);
+                        }
+                    }, 600);
+                }
+                EmbedShared.sendCommand(text, msgImages);
+                EmbedShared.estimateTokens(text);
+                isStreaming = true;
+                setActivity('Thinking...');
+                scrollToBottom();
+                inputEl.focus();
+            }
+
+            function finalizeStreaming() {
+                if (isStreaming && streamingContent) {
+                    EmbedShared.estimateTokens(streamingContent);
+                }
+                isStreaming = false;
+                streamingEl = null;
+                streamingContent = '';
+                hideActivity();
+                inputEl.focus();
+                // Drain one queued message if any. The newly-dispatched message
+                // will set isStreaming=true so further queued ones wait for
+                // the next finalizeStreaming() call.
+                if (pendingMessages.length > 0) {
+                    var next = pendingMessages.shift();
+                    updateQueuedBadge();
+                    dispatchMessage(next.text, next.images, next);
+                }
+            }
+
+            // Update the small "queued: N" indicator on the send button.
+            // Keeps the input + button enabled — the badge is the only signal
+            // that the current Send won't fire immediately.
+            function updateQueuedBadge() {
+                if (!sendBtn) return;
+                if (pendingMessages.length > 0) {
+                    sendBtn.textContent = 'Queue (' + pendingMessages.length + ')';
+                    sendBtn.title = pendingMessages.length + ' message(s) queued; click to add another';
+                } else {
+                    sendBtn.textContent = 'Send';
+                    sendBtn.title = '';
+                }
+            }
+
+            // --- Message Rendering ---
+
+            function appendMsg(role, content, ts) {
+                var el = document.createElement('div');
+                el.className = 'msg ' + role;
+                var body = document.createElement('div');
+                body.className = 'msg-body';
+                el.appendChild(body);
+                updateMsgContent(body, content, el);
+                if (role === 'user' || role === 'assistant') {
+                    var timeEl = document.createElement('div');
+                    timeEl.className = 'msg-time';
+                    var d = (ts instanceof Date) ? ts : (ts ? new Date(ts) : new Date());
+                    timeEl.dataset.ts = String(d.getTime());
+                    timeEl.textContent = formatMsgTime(d);
+                    timeEl.title = d.toString();
+                    el.appendChild(timeEl);
+                }
+                messagesDiv.appendChild(el);
+                scrollToBottom();
+                return el;
+            }
+
+            function updateMsgContent(target, content, parentEl) {
+                if (!target) return;
+                // If caller passed the outer .msg div (existing callers do this for
+                // streaming updates + queue reuse), find the .msg-body child and write
+                // into THAT so the .msg-time sibling survives.
+                var roleEl;
+                if (parentEl) {
+                    roleEl = parentEl;
+                } else if (target.classList && target.classList.contains('msg')) {
+                    roleEl = target;
+                    var body = target.querySelector(':scope > .msg-body');
+                    if (body) target = body;
+                } else {
+                    roleEl = target;
+                }
+                // Markdown for assistant/system; raw text for user
+                if (roleEl.classList && (roleEl.classList.contains('assistant') || roleEl.classList.contains('system'))) {
+                    try {
+                        if (typeof marked !== 'undefined' && content) {
+                            target.innerHTML = marked.parse(content);
+                        } else {
+                            target.textContent = content || '';
+                        }
+                    } catch (e) {
+                        target.textContent = content || '';
+                    }
+                } else {
+                    target.textContent = content || '';
+                }
+            }
+
+            // Compact relative-ish timestamp: today → "3:42 PM"; yesterday → "Yesterday 3:42 PM";
+            // this week → "Mon 3:42 PM"; older → "May 12, 3:42 PM"; >1 year → "May 12 2025, 3:42 PM"
+            function formatMsgTime(d) {
+                if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+                var now = new Date();
+                var timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                var sameDay = d.toDateString() === now.toDateString();
+                if (sameDay) return timeStr;
+                var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+                if (d.toDateString() === yesterday.toDateString()) return 'Yesterday ' + timeStr;
+                var diffDays = Math.floor((now - d) / 86400000);
+                if (diffDays < 7 && diffDays >= 0) {
+                    var dow = d.toLocaleDateString([], { weekday: 'short' });
+                    return dow + ' ' + timeStr;
+                }
+                if (d.getFullYear() === now.getFullYear()) {
+                    return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + timeStr;
+                }
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' + timeStr;
+            }
+
+            // Refresh "minutes ago"-style labels every 60s so "3:42 PM" eventually
+            // becomes "Yesterday 3:42 PM" without a reload. Cheap — just walks .msg-time nodes.
+            setInterval(function() {
+                var nodes = messagesDiv.querySelectorAll('.msg-time');
+                nodes.forEach(function(n) {
+                    var ts = parseInt(n.dataset.ts || '0', 10);
+                    if (!ts) return;
+                    n.textContent = formatMsgTime(new Date(ts));
+                });
+            }, 60000);
+
+            function appendToolCard(toolName, input) {
+                var card = document.createElement('div');
+                card.className = 'tool-card collapsed';
+
+                var friendly = friendlyToolName(toolName);
+                var inputStr = '';
+                try {
+                    inputStr = JSON.stringify(input, null, 2);
+                } catch (e) {
+                    inputStr = String(input || '');
+                }
+
+                card.innerHTML =
+                    '<div class="tool-header">' +
+                        '<span class="tool-icon">\uD83D\uDD27</span> ' +
+                        '<span class="tool-name">' + escapeHtml(friendly) + '</span>' +
+                        '<span class="tool-chevron">\u25B6</span>' +
+                    '</div>' +
+                    '<div class="tool-body"><pre>' + escapeHtml(inputStr) + '</pre></div>';
+
+                // Toggle collapse on header click
+                card.querySelector('.tool-header').addEventListener('click', function() {
+                    card.classList.toggle('collapsed');
+                });
+
+                messagesDiv.appendChild(card);
+                scrollToBottom();
+            }
+
+            function showPermissionCard(data) {
+                var card = document.createElement('div');
+                card.className = 'permission-card';
+                var reqId = data.requestId || '';
+                card.id = 'perm-' + reqId;
+
+                var toolDisplay = friendlyToolName(data.toolName || 'Unknown');
+                var inputStr = '';
+                try {
+                    inputStr = JSON.stringify(data.input || {}, null, 2);
+                    if (inputStr.length > 500) inputStr = inputStr.substring(0, 500) + '...';
+                } catch (e) {
+                    inputStr = String(data.input || '');
+                }
+
+                card.innerHTML =
+                    '<div class="perm-header">' +
+                        '<span class="perm-icon">\u26A0\uFE0F</span> Claude wants to: <strong>' + escapeHtml(toolDisplay) + '</strong>' +
+                    '</div>' +
+                    '<div class="perm-details"><pre>' + escapeHtml(inputStr) + '</pre></div>' +
+                    '<div class="perm-actions">' +
+                        '<button class="perm-approve">\u2713 Approve</button>' +
+                        '<button class="perm-deny">\u2717 Deny</button>' +
+                    '</div>' +
+                    '<div class="perm-result"></div>';
+
+                // Wire up approve/deny buttons
+                card.querySelector('.perm-approve').addEventListener('click', function() {
+                    respondPerm(reqId, true, card);
+                });
+                card.querySelector('.perm-deny').addEventListener('click', function() {
+                    respondPerm(reqId, false, card);
+                });
+
+                messagesDiv.appendChild(card);
+                scrollToBottom();
+            }
+
+            function respondPerm(requestId, allowed, cardEl) {
+                EmbedShared.respondPermission(requestId, allowed);
+                cardEl.classList.add('resolved');
+                cardEl.classList.add(allowed ? 'approved' : 'denied');
+                cardEl.querySelector('.perm-result').textContent = allowed ? 'Approved' : 'Denied';
+                cardEl.querySelector('.perm-actions').style.display = 'none';
+            }
+
+            function renderHistory(messages) {
+                messagesDiv.innerHTML = '';
+                if (!messages || !messages.length) {
+                    appendMsg('system', 'No previous messages.');
+                    return;
+                }
+                // JSONL entries from /api/projects/.../sessions/.../messages have shape:
+                //   { type:'user'|'assistant'|'summary'|'system'|..., message:{role,content:[...]}, sessionId, timestamp }
+                // Older/alt shapes may have content directly on the outer object — fall back to that.
+                messages.forEach(function(m) {
+                    if (!m || typeof m !== 'object') return;
+
+                    var role = m.type || (m.message && m.message.role) || m.role || '';
+                    // Skip non-conversation entries (summaries, queue-operations, progress, etc.)
+                    if (role !== 'user' && role !== 'assistant') return;
+
+                    var inner = m.message || m;
+                    var rawContent = inner.content;
+                    if (rawContent == null && typeof m.text === 'string') rawContent = m.text;
+                    // JSONL entries carry timestamp; format is ISO string or epoch ms.
+                    var msgTs = m.timestamp || inner.timestamp || null;
+
+                    if (role === 'user') {
+                        var text = '';
+                        if (typeof rawContent === 'string') {
+                            text = rawContent;
+                        } else if (Array.isArray(rawContent)) {
+                            // User content blocks may include text OR tool_result (skip tool results in UI)
+                            var hasRealText = false;
+                            rawContent.forEach(function(c) {
+                                if (c && c.type === 'text' && c.text) {
+                                    text += (text ? '\n' : '') + c.text;
+                                    hasRealText = true;
+                                }
+                                // tool_result blocks silently skipped
+                            });
+                            if (!hasRealText) return; // pure tool-result user message — don't render
+                        }
+                        text = String(text).replace(/^\[Context:[\s\S]*?\]\s*/i, '');
+                        if (text) appendMsg('user', text, msgTs);
+                        return;
+                    }
+
+                    // assistant
+                    var content = '';
+                    var toolBlocks = [];
+                    if (typeof rawContent === 'string') {
+                        content = rawContent;
+                    } else if (Array.isArray(rawContent)) {
+                        rawContent.forEach(function(c) {
+                            if (!c || typeof c !== 'object') return;
+                            if (c.type === 'text' && c.text) {
+                                content += (content ? '\n\n' : '') + c.text;
+                            } else if (c.type === 'tool_use') {
+                                toolBlocks.push(c);
+                            }
+                            // thinking / redacted_thinking blocks silently skipped
+                        });
+                    }
+                    toolBlocks.forEach(function(tb) {
+                        appendToolCard(tb.name || 'tool', tb.input);
+                    });
+                    if (content) appendMsg('assistant', content, msgTs);
+                });
+                scrollToBottom();
+            }
+
+            // --- Utilities ---
+
+            function scrollToBottom() {
+                requestAnimationFrame(function() {
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                });
+            }
+
+            function setActivity(text) {
+                activityBar.style.display = 'flex';
+                document.getElementById('activityText').textContent = text;
+            }
+
+            function hideActivity() {
+                activityBar.style.display = 'none';
+            }
+
+            function escapeHtml(str) {
+                var div = document.createElement('div');
+                div.textContent = str || '';
+                return div.innerHTML;
+            }
+
+            function friendlyToolName(name) {
+                if (!name) return 'unknown';
+                return name.replace(/^mcp__[^_]+__/, '').replace(/_/g, ' ');
+            }
+
+            // --- Image Paste ---
+
+            inputEl.addEventListener('paste', function(e) {
+                var items = (e.clipboardData || e.originalEvent.clipboardData || {}).items;
+                if (!items) return;
+                for (var i = 0; i < items.length; i++) {
+                    if (items[i].type.indexOf('image') !== -1) {
+                        var file = items[i].getAsFile();
+                        if (!file) continue;
+                        var reader = new FileReader();
+                        reader.onload = function(ev) {
+                            images.push(ev.target.result);
+                            var preview = document.createElement('img');
+                            preview.src = ev.target.result;
+                            preview.className = 'image-preview-thumb';
+                            imagePreviewsEl.appendChild(preview);
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                }
+            });
+
+            // --- Keyboard ---
+
+            inputEl.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+
+            // Auto-resize textarea
+            inputEl.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+            });
+
+            // Wire up send button
+            sendBtn.addEventListener('click', function() {
+                sendMessage();
+            });
+
+        })();
+    </script>
+</body>
+</html>

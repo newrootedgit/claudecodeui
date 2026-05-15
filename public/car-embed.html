@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Car Embed</title>
+    <link rel="stylesheet" href="embed-shared.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Large message bubbles for glanceable use */
+        .chat-messages {
+            padding: 20px 24px;
+            gap: 18px;
+        }
+        .msg {
+            max-width: 92%;
+            padding: 16px 20px;
+            border-radius: 16px;
+            font-size: 20px;
+            line-height: 1.45;
+        }
+        .msg.user { border-bottom-right-radius: 6px; }
+        .msg.assistant { border-bottom-left-radius: 6px; }
+        .msg.system { font-size: 16px; }
+
+        /* Hide tool cards and permission cards — car mode is text-only */
+        .tool-card, .permission-card { display: none !important; }
+
+        /* Input row */
+        .input-area {
+            padding: 16px 20px;
+            gap: 12px;
+            align-items: center;
+        }
+        .input-area textarea {
+            padding: 14px 18px;
+            font-size: 18px;
+            min-height: 56px;
+            max-height: 200px;
+            border-radius: 12px;
+        }
+        .input-area button.send-btn {
+            padding: 14px 22px;
+            font-size: 16px;
+            border-radius: 12px;
+            height: 56px;
+        }
+
+        /* Mic button — large circular touch target, bottom-center */
+        .mic-btn {
+            width: 72px;
+            height: 72px;
+            min-width: 72px;
+            border-radius: 50%;
+            background: #00d47e;
+            color: #0a0f0d;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .mic-btn:hover { background: #00b86b; }
+        .mic-btn:active { transform: scale(0.95); }
+        .mic-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            background: #2a3530;
+        }
+        .mic-btn svg {
+            width: 32px;
+            height: 32px;
+            fill: currentColor;
+        }
+        .mic-btn.recording {
+            background: #ff4545;
+            color: #fff;
+            animation: mic-pulse 1.2s ease-in-out infinite;
+        }
+        .mic-btn.recording:hover { background: #ff5555; }
+        @keyframes mic-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255, 69, 69, 0.6); }
+            50%      { box-shadow: 0 0 0 18px rgba(255, 69, 69, 0); }
+        }
+
+        /* Voice activity overlay */
+        #voiceStatus {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            background: rgba(20, 26, 23, 0.95);
+            color: #e0e8e2;
+            border: 1px solid #1e2a24;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 50;
+            display: none;
+        }
+        #voiceStatus.visible { display: block; }
+
+        /* Speaking indicator — subtle ring on the mic button while TTS is playing */
+        .mic-btn.speaking::after {
+            content: '';
+            position: absolute;
+            top: -4px; left: -4px; right: -4px; bottom: -4px;
+            border: 2px solid #00d47e;
+            border-radius: 50%;
+            animation: speak-pulse 1.5s ease-out infinite;
+        }
+        @keyframes speak-pulse {
+            0%   { transform: scale(1); opacity: 1; }
+            100% { transform: scale(1.3); opacity: 0; }
+        }
+
+        .activity-bar {
+            padding: 10px 20px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="connectOverlay" class="connecting-overlay">
+        <div class="spinner"></div>
+        <div class="status-text">Waiting for connection...</div>
+    </div>
+
+    <div id="activityBar" class="activity-bar" style="display:none">
+        <div class="activity-spinner"></div>
+        <span id="activityText">Working...</span>
+    </div>
+
+    <div id="messages" class="chat-messages"></div>
+
+    <div id="voiceStatus"></div>
+
+    <div class="input-area">
+        <textarea id="chatInput" placeholder="Tap mic or type..." rows="1" disabled></textarea>
+        <button id="sendBtn" class="send-btn" disabled>Send</button>
+        <button id="micBtn" class="mic-btn" disabled title="Press and hold to talk">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a1 1 0 0 0-2 0 3 3 0 0 1-6 0 1 1 0 0 0-2 0 5 5 0 0 0 4 4.9V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-3.1a5 5 0 0 0 4-4.9z"/>
+            </svg>
+        </button>
+    </div>
+
+    <script src="embed-shared.js"></script>
+    <script>
+        (function() {
+            'use strict';
+
+            // DOM
+            var messagesDiv = document.getElementById('messages');
+            var inputEl = document.getElementById('chatInput');
+            var sendBtn = document.getElementById('sendBtn');
+            var micBtn = document.getElementById('micBtn');
+            var activityBar = document.getElementById('activityBar');
+            var connectOverlay = document.getElementById('connectOverlay');
+            var voiceStatus = document.getElementById('voiceStatus');
+
+            // Streaming state (from chat-embed parity)
+            var isStreaming = false;
+            var streamingEl = null;
+            var streamingContent = '';
+            var lastAssistantText = '';
+
+            // Voice state
+            var mediaRecorder = null;
+            var audioChunks = [];
+            var recordingStream = null;
+            var recordingAudioCtx = null;
+            var recordingSilenceTimer = null;
+            var isRecording = false;
+
+            // TTS playback state
+            var audioEl = new Audio();
+            audioEl.preload = 'auto';
+            var ttsQueue = [];       // Array<{url, abortController}>
+            var ttsFetching = [];    // Active AbortControllers for pending TTS POSTs
+            var isSpeaking = false;
+
+            // Configure marked
+            if (typeof marked !== 'undefined') {
+                marked.setOptions({ breaks: true, gfm: true });
+            }
+
+            // ============================================================
+            // EmbedShared wiring
+            // ============================================================
+            EmbedShared.init({
+                onMessage: handleMessage,
+                onConnect: function() {
+                    connectOverlay.style.display = 'none';
+                    inputEl.disabled = false;
+                    sendBtn.disabled = false;
+                    micBtn.disabled = false;
+                },
+                onDisconnect: function() {
+                    connectOverlay.querySelector('.status-text').textContent = 'Reconnecting...';
+                    connectOverlay.style.display = 'flex';
+                    inputEl.disabled = true;
+                    sendBtn.disabled = true;
+                    micBtn.disabled = true;
+                    stopSpeaking();
+                },
+                onSessionCreated: function() {},
+                onClearMessages: function() {
+                    messagesDiv.innerHTML = '';
+                    isStreaming = false;
+                    streamingEl = null;
+                    streamingContent = '';
+                    stopSpeaking();
+                },
+                onHistoryLoaded: function(msgs) {
+                    renderHistory(msgs);
+                },
+                onUserMessage: function(text) {
+                    if (text) appendMsg('user', text);
+                    setActivity('Thinking...');
+                    scrollToBottom();
+                },
+                onFocus: function() { inputEl.focus(); },
+                onError: function(error) { appendMsg('system', 'Error: ' + error); }
+            });
+
+            // ============================================================
+            // WS response handler (text-only, no tool cards)
+            // ============================================================
+            function handleMessage(data) {
+                if (!data) return;
+
+                if (data.type === 'claude-response') {
+                    var sdk = data.data || {};
+                    var inner = (sdk && sdk.message && typeof sdk.message === 'object') ? sdk.message : sdk;
+
+                    if (sdk.type === 'system' || sdk.type === 'user') return;
+
+                    if (sdk.type === 'result') {
+                        var resultText = sdk.result || inner.result || inner.text || '';
+                        if (resultText && !streamingContent) {
+                            streamingContent = resultText;
+                            appendMsg('assistant', resultText);
+                        }
+                        if (resultText) lastAssistantText = resultText;
+                        finalizeStreaming();
+                        return;
+                    }
+
+                    if (sdk.type === 'assistant' && inner && Array.isArray(inner.content)) {
+                        var textContent = '';
+                        var hadToolUse = false;
+                        inner.content.forEach(function(block) {
+                            if (block.type === 'text' && block.text) textContent += block.text;
+                            else if (block.type === 'tool_use') hadToolUse = true;
+                        });
+                        if (hadToolUse) setActivity('Working...');
+                        if (textContent) {
+                            if (!isStreaming) {
+                                isStreaming = true;
+                                streamingContent = '';
+                                streamingEl = appendMsg('assistant', '');
+                                setActivity('Thinking...');
+                            }
+                            streamingContent += (streamingContent ? '\n\n' : '') + textContent;
+                            updateMsgContent(streamingEl, streamingContent);
+                            lastAssistantText = streamingContent;
+                            scrollToBottom();
+                        }
+                        return;
+                    }
+                    return;
+                }
+
+                if (data.type === 'claude-complete') {
+                    var finalText = lastAssistantText || streamingContent;
+                    finalizeStreaming();
+                    EmbedShared.notifyParent('response-complete', { text: finalText });
+                    // Start TTS for the full response
+                    if (finalText) speakResponse(finalText);
+                    return;
+                }
+
+                if (data.type === 'claude-error') {
+                    appendMsg('system', 'Error: ' + (data.error || 'Unknown error'));
+                    finalizeStreaming();
+                    return;
+                }
+
+                if (data.type === 'claude-permission-request') {
+                    EmbedShared.notifyParent('permission-request', data);
+                    return;
+                }
+            }
+
+            // ============================================================
+            // Sending
+            // ============================================================
+            function sendMessage(text) {
+                var t = (text || inputEl.value || '').trim();
+                if (!t) return;
+
+                appendMsg('user', t);
+                EmbedShared.sendCommand(t);
+                EmbedShared.estimateTokens(t);
+
+                inputEl.value = '';
+                inputEl.style.height = 'auto';
+                inputEl.disabled = true;
+                sendBtn.disabled = true;
+                micBtn.disabled = true;
+                setActivity('Thinking...');
+                scrollToBottom();
+            }
+
+            function finalizeStreaming() {
+                if (isStreaming && streamingContent) {
+                    EmbedShared.estimateTokens(streamingContent);
+                }
+                isStreaming = false;
+                streamingEl = null;
+                streamingContent = '';
+                inputEl.disabled = false;
+                sendBtn.disabled = false;
+                micBtn.disabled = false;
+                hideActivity();
+            }
+
+            // ============================================================
+            // Message rendering
+            // ============================================================
+            function appendMsg(role, content, ts) {
+                var el = document.createElement('div');
+                el.className = 'msg ' + role;
+                var body = document.createElement('div');
+                body.className = 'msg-body';
+                el.appendChild(body);
+                updateMsgContent(body, content, el);
+                if (role === 'user' || role === 'assistant') {
+                    var timeEl = document.createElement('div');
+                    timeEl.className = 'msg-time';
+                    var d = (ts instanceof Date) ? ts : (ts ? new Date(ts) : new Date());
+                    timeEl.dataset.ts = String(d.getTime());
+                    timeEl.textContent = formatMsgTime(d);
+                    timeEl.title = d.toString();
+                    el.appendChild(timeEl);
+                }
+                messagesDiv.appendChild(el);
+                scrollToBottom();
+                return el;
+            }
+
+            function updateMsgContent(target, content, parentEl) {
+                if (!target) return;
+                var roleEl;
+                if (parentEl) {
+                    roleEl = parentEl;
+                } else if (target.classList && target.classList.contains('msg')) {
+                    roleEl = target;
+                    var bodyEl = target.querySelector(':scope > .msg-body');
+                    if (bodyEl) target = bodyEl;
+                } else {
+                    roleEl = target;
+                }
+                if (roleEl.classList && (roleEl.classList.contains('assistant') || roleEl.classList.contains('system'))) {
+                    try {
+                        if (typeof marked !== 'undefined' && content) {
+                            target.innerHTML = marked.parse(content);
+                        } else {
+                            target.textContent = content || '';
+                        }
+                    } catch (e) {
+                        target.textContent = content || '';
+                    }
+                } else {
+                    target.textContent = content || '';
+                }
+            }
+
+            function formatMsgTime(d) {
+                if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+                var now = new Date();
+                var timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                var sameDay = d.toDateString() === now.toDateString();
+                if (sameDay) return timeStr;
+                var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+                if (d.toDateString() === yesterday.toDateString()) return 'Yesterday ' + timeStr;
+                var diffDays = Math.floor((now - d) / 86400000);
+                if (diffDays < 7 && diffDays >= 0) {
+                    return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + timeStr;
+                }
+                if (d.getFullYear() === now.getFullYear()) {
+                    return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + timeStr;
+                }
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' + timeStr;
+            }
+
+            setInterval(function() {
+                var nodes = messagesDiv.querySelectorAll('.msg-time');
+                nodes.forEach(function(n) {
+                    var ts = parseInt(n.dataset.ts || '0', 10);
+                    if (!ts) return;
+                    n.textContent = formatMsgTime(new Date(ts));
+                });
+            }, 60000);
+
+            function renderHistory(messages) {
+                messagesDiv.innerHTML = '';
+                if (!messages || !messages.length) return;
+                messages.forEach(function(m) {
+                    if (!m || typeof m !== 'object') return;
+                    var role = m.type || (m.message && m.message.role) || m.role || '';
+                    if (role !== 'user' && role !== 'assistant') return;
+
+                    var inner = m.message || m;
+                    var rawContent = inner.content;
+                    if (rawContent == null && typeof m.text === 'string') rawContent = m.text;
+                    var msgTs = m.timestamp || inner.timestamp || null;
+
+                    if (role === 'user') {
+                        var text = '';
+                        if (typeof rawContent === 'string') text = rawContent;
+                        else if (Array.isArray(rawContent)) {
+                            var hasRealText = false;
+                            rawContent.forEach(function(c) {
+                                if (c && c.type === 'text' && c.text) {
+                                    text += (text ? '\n' : '') + c.text;
+                                    hasRealText = true;
+                                }
+                            });
+                            if (!hasRealText) return;
+                        }
+                        text = String(text).replace(/^\[Context:[\s\S]*?\]\s*/i, '');
+                        if (text) appendMsg('user', text, msgTs);
+                        return;
+                    }
+
+                    var content = '';
+                    if (typeof rawContent === 'string') content = rawContent;
+                    else if (Array.isArray(rawContent)) {
+                        rawContent.forEach(function(c) {
+                            if (c && c.type === 'text' && c.text) {
+                                content += (content ? '\n\n' : '') + c.text;
+                            }
+                        });
+                    }
+                    if (content) appendMsg('assistant', content, msgTs);
+                });
+                scrollToBottom();
+            }
+
+            function scrollToBottom() {
+                requestAnimationFrame(function() {
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                });
+            }
+
+            function setActivity(text) {
+                activityBar.style.display = 'flex';
+                document.getElementById('activityText').textContent = text;
+            }
+            function hideActivity() { activityBar.style.display = 'none'; }
+
+            function setVoiceStatus(text) {
+                if (text) {
+                    voiceStatus.textContent = text;
+                    voiceStatus.classList.add('visible');
+                } else {
+                    voiceStatus.classList.remove('visible');
+                }
+            }
+
+            // ============================================================
+            // STT — Record → POST /api/stt → send
+            // ============================================================
+            async function startRecording() {
+                if (isRecording) return;
+
+                // If TTS is playing, stop it first (barge-in)
+                stopSpeaking();
+
+                try {
+                    recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                } catch (e) {
+                    appendMsg('system', 'Microphone access denied: ' + (e.message || e));
+                    return;
+                }
+
+                audioChunks = [];
+                // Default MediaRecorder mime; faster-whisper (via ffmpeg) decodes webm/opus fine.
+                var options = {};
+                var preferredTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+                for (var i = 0; i < preferredTypes.length; i++) {
+                    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(preferredTypes[i])) {
+                        options.mimeType = preferredTypes[i];
+                        break;
+                    }
+                }
+
+                try {
+                    mediaRecorder = new MediaRecorder(recordingStream, options);
+                } catch (e) {
+                    appendMsg('system', 'Recording not supported: ' + (e.message || e));
+                    cleanupRecording();
+                    return;
+                }
+
+                mediaRecorder.ondataavailable = function(ev) {
+                    if (ev.data && ev.data.size > 0) audioChunks.push(ev.data);
+                };
+                mediaRecorder.onstop = function() {
+                    var mimeType = mediaRecorder.mimeType || 'audio/webm';
+                    var blob = new Blob(audioChunks, { type: mimeType });
+                    cleanupRecording();
+                    if (blob.size < 500) {
+                        setVoiceStatus('');
+                        return; // too short
+                    }
+                    transcribeAndSend(blob);
+                };
+
+                isRecording = true;
+                micBtn.classList.add('recording');
+                setVoiceStatus('Listening... release to send');
+                mediaRecorder.start();
+            }
+
+            function stopRecording() {
+                if (!isRecording) return;
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    try { mediaRecorder.stop(); } catch (_) {}
+                }
+                // cleanup runs in onstop
+            }
+
+            function cleanupRecording() {
+                isRecording = false;
+                micBtn.classList.remove('recording');
+                if (recordingSilenceTimer) { clearInterval(recordingSilenceTimer); recordingSilenceTimer = null; }
+                if (recordingStream) {
+                    recordingStream.getTracks().forEach(function(t) { try { t.stop(); } catch(_){} });
+                    recordingStream = null;
+                }
+                if (recordingAudioCtx) {
+                    try { recordingAudioCtx.close(); } catch(_){}
+                    recordingAudioCtx = null;
+                }
+            }
+
+            // RMS-based silence detection — stop recording after 2s of silence
+            function startSilenceDetection() {
+                try {
+                    var AC = window.AudioContext || window.webkitAudioContext;
+                    if (!AC) return;
+                    recordingAudioCtx = new AC();
+                    var source = recordingAudioCtx.createMediaStreamSource(recordingStream);
+                    var analyser = recordingAudioCtx.createAnalyser();
+                    analyser.fftSize = 1024;
+                    source.connect(analyser);
+                    var buf = new Uint8Array(analyser.frequencyBinCount);
+
+                    var silentSince = null;
+                    var SILENCE_THRESHOLD = 8;   // 0-128 scale of RMS over 128
+                    var SILENCE_MS = 2000;
+                    var MIN_RECORDING_MS = 1000; // don't stop in first second
+                    var startedAt = Date.now();
+
+                    recordingSilenceTimer = setInterval(function() {
+                        if (!isRecording) return;
+                        analyser.getByteTimeDomainData(buf);
+                        // Compute RMS deviation from 128 (silence = all 128s)
+                        var sum = 0;
+                        for (var i = 0; i < buf.length; i++) {
+                            var v = buf[i] - 128;
+                            sum += v * v;
+                        }
+                        var rms = Math.sqrt(sum / buf.length);
+                        var now = Date.now();
+
+                        if (rms < SILENCE_THRESHOLD) {
+                            if (silentSince === null) silentSince = now;
+                            if (now - silentSince > SILENCE_MS && now - startedAt > MIN_RECORDING_MS) {
+                                stopRecording();
+                            }
+                        } else {
+                            silentSince = null;
+                        }
+                    }, 100);
+                } catch (e) {
+                    // Silence detection is best-effort; user can always tap mic again to stop
+                    console.warn('silence detection failed:', e);
+                }
+            }
+
+            async function transcribeAndSend(blob) {
+                setVoiceStatus('Transcribing...');
+                inputEl.disabled = true;
+                sendBtn.disabled = true;
+                micBtn.disabled = true;
+
+                var fd = new FormData();
+                fd.append('audio', blob, 'recording.webm');
+
+                try {
+                    var token = EmbedShared.token;
+                    var resp = await fetch('/api/stt', {
+                        method: 'POST',
+                        headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+                        body: fd
+                    });
+                    if (!resp.ok) {
+                        var errTxt = await resp.text();
+                        appendMsg('system', 'STT failed (' + resp.status + '): ' + errTxt.slice(0, 200));
+                        setVoiceStatus('');
+                        inputEl.disabled = false;
+                        sendBtn.disabled = false;
+                        micBtn.disabled = false;
+                        return;
+                    }
+                    var data = await resp.json();
+                    var text = (data && data.text) ? data.text.trim() : '';
+                    setVoiceStatus('');
+                    if (!text) {
+                        inputEl.disabled = false;
+                        sendBtn.disabled = false;
+                        micBtn.disabled = false;
+                        return;
+                    }
+                    sendMessage(text);
+                } catch (e) {
+                    appendMsg('system', 'STT error: ' + (e.message || e));
+                    setVoiceStatus('');
+                    inputEl.disabled = false;
+                    sendBtn.disabled = false;
+                    micBtn.disabled = false;
+                }
+            }
+
+            // ============================================================
+            // TTS — sentence-chunked playback with tap-to-interrupt
+            // ============================================================
+            function splitSentences(text) {
+                if (!text) return [];
+                // Strip markdown artifacts for TTS (keep bullet text, drop formatting chars)
+                var cleaned = String(text)
+                    .replace(/```[\s\S]*?```/g, ' ')  // code blocks → skip
+                    .replace(/`([^`]+)`/g, '$1')      // inline code → plain
+                    .replace(/\*\*([^*]+)\*\*/g, '$1')
+                    .replace(/\*([^*]+)\*/g, '$1')
+                    .replace(/_{1,2}([^_]+)_{1,2}/g, '$1')
+                    .replace(/^#+\s+/gm, '')
+                    .replace(/^\s*[-*]\s+/gm, '')
+                    .replace(/\n{2,}/g, '. ')
+                    .replace(/\n/g, ' ')
+                    .trim();
+                // Split on sentence terminators, keep each chunk reasonable length
+                var sentences = cleaned.match(/[^.!?]+[.!?]+|\s*[^.!?]+\s*$/g) || [cleaned];
+                var out = [];
+                sentences.forEach(function(s) {
+                    s = s.trim();
+                    if (!s) return;
+                    // Further split very long chunks on commas to reduce TTS latency per chunk
+                    if (s.length > 240) {
+                        var parts = s.split(/,\s+/);
+                        var buf = '';
+                        parts.forEach(function(p) {
+                            if ((buf + p).length > 200) {
+                                if (buf) out.push(buf.trim());
+                                buf = p + ', ';
+                            } else {
+                                buf += p + ', ';
+                            }
+                        });
+                        if (buf.trim()) out.push(buf.trim().replace(/,$/, ''));
+                    } else {
+                        out.push(s);
+                    }
+                });
+                return out;
+            }
+
+            async function speakResponse(fullText) {
+                stopSpeaking();  // clear any prior playback
+
+                var chunks = splitSentences(fullText);
+                if (!chunks.length) return;
+
+                isSpeaking = true;
+                micBtn.classList.add('speaking');
+
+                // Kick off fetches for all chunks in parallel; play sequentially as they resolve.
+                // This lets Chunk N+1 start downloading while Chunk N plays.
+                var chunkPromises = chunks.map(function(text) {
+                    var ac = new AbortController();
+                    ttsFetching.push(ac);
+                    return fetchTtsBlob(text, ac.signal).then(function(url) {
+                        var idx = ttsFetching.indexOf(ac);
+                        if (idx >= 0) ttsFetching.splice(idx, 1);
+                        return url;
+                    }).catch(function(err) {
+                        if (err && err.name === 'AbortError') return null;
+                        console.warn('TTS fetch failed for chunk:', err);
+                        return null;
+                    });
+                });
+
+                // Play in order, awaiting each URL as it resolves
+                for (var i = 0; i < chunkPromises.length; i++) {
+                    if (!isSpeaking) break;  // interrupted
+                    var url = await chunkPromises[i];
+                    if (!isSpeaking) { if (url) URL.revokeObjectURL(url); break; }
+                    if (!url) continue;
+                    await playAudioUrl(url);
+                    URL.revokeObjectURL(url);
+                }
+
+                isSpeaking = false;
+                micBtn.classList.remove('speaking');
+            }
+
+            async function fetchTtsBlob(text, signal) {
+                var token = EmbedShared.token;
+                var resp = await fetch('/api/tts', {
+                    method: 'POST',
+                    headers: Object.assign(
+                        { 'Content-Type': 'application/json' },
+                        token ? { 'Authorization': 'Bearer ' + token } : {}
+                    ),
+                    body: JSON.stringify({ text: text }),
+                    signal: signal
+                });
+                if (!resp.ok) {
+                    var errTxt = await resp.text();
+                    throw new Error('TTS ' + resp.status + ': ' + errTxt.slice(0, 120));
+                }
+                var blob = await resp.blob();
+                return URL.createObjectURL(blob);
+            }
+
+            function playAudioUrl(url) {
+                return new Promise(function(resolve) {
+                    audioEl.onended = function() { resolve(); };
+                    audioEl.onerror = function() { resolve(); };
+                    audioEl.src = url;
+                    audioEl.play().catch(function(e) {
+                        // autoplay blocked or aborted
+                        console.warn('audio play failed:', e && e.message);
+                        resolve();
+                    });
+                });
+            }
+
+            function stopSpeaking() {
+                isSpeaking = false;
+                try { audioEl.pause(); } catch(_){}
+                try { audioEl.removeAttribute('src'); audioEl.load(); } catch(_){}
+                // Abort pending TTS fetches
+                ttsFetching.forEach(function(ac) { try { ac.abort(); } catch(_){} });
+                ttsFetching = [];
+                micBtn.classList.remove('speaking');
+            }
+
+            // ============================================================
+            // UI events
+            // ============================================================
+            inputEl.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            inputEl.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+            });
+            sendBtn.addEventListener('click', function() { sendMessage(); });
+
+            // Press-and-hold to talk. Pointer events cover mouse + touch + stylus.
+            micBtn.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!isRecording) startRecording();
+            });
+            function endHold(e) {
+                if (e) e.stopPropagation();
+                if (isRecording) stopRecording();
+            }
+            micBtn.addEventListener('pointerup', endHold);
+            micBtn.addEventListener('pointercancel', endHold);
+            micBtn.addEventListener('pointerleave', endHold);
+            // Safari/iOS: touch events as fallback if pointer events not fully honored
+            micBtn.addEventListener('touchend', endHold);
+            // Prevent context menu on long-press (which is the whole point of this UX)
+            micBtn.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+            // Tap-to-interrupt: tap anywhere outside mic/input while TTS is playing → stop speaking
+            document.addEventListener('click', function(e) {
+                if (!isSpeaking) return;
+                var t = e.target;
+                if (t === micBtn || micBtn.contains(t)) return;
+                if (t === inputEl || t === sendBtn) return;
+                stopSpeaking();
+            });
+
+            // Input focus shouldn't interrupt TTS, but typing should feel snappy
+            inputEl.addEventListener('focus', function(e) { e.stopPropagation(); });
+
+            // Clean up blob URLs on unload
+            window.addEventListener('beforeunload', function() {
+                stopSpeaking();
+                cleanupRecording();
+            });
+        })();
+    </script>
+</body>
+</html>

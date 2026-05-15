@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Terminal Embed</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { background: #0a0f0d; height: 100vh; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
+        #terminal { height: 100vh; width: 100%; padding: 4px; }
+
+        #status-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #0a0f0d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            transition: opacity 0.3s;
+        }
+        #status-overlay.hidden { opacity: 0; pointer-events: none; }
+        .status-box { text-align: center; color: #e0e8e2; }
+        .spinner {
+            width: 36px; height: 36px;
+            border: 3px solid rgba(0,212,126,0.15);
+            border-top-color: #00d47e;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .status-msg { font-size: 13px; color: #8a9490; }
+        .error-msg { color: #ff6b6b; margin-top: 12px; font-size: 13px; }
+
+        .xterm-viewport::-webkit-scrollbar { width: 6px; }
+        .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+        .xterm-viewport::-webkit-scrollbar-thumb { background: #2a3530; border-radius: 3px; }
+
+        #resume-btn {
+            position: fixed;
+            top: 8px;
+            right: 14px;
+            z-index: 50;
+            background: rgba(0, 212, 126, 0.15);
+            border: 1px solid rgba(0, 212, 126, 0.45);
+            color: #4ade80;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+            font-size: 12px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            opacity: 0.6;
+            transition: opacity 0.15s, background 0.15s;
+        }
+        #resume-btn:hover { opacity: 1; background: rgba(0, 212, 126, 0.25); }
+        #resume-btn:active { background: rgba(0, 212, 126, 0.4); }
+        #resume-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div id="status-overlay">
+        <div class="status-box">
+            <div class="spinner" id="spinner"></div>
+            <div class="status-msg" id="status-msg">Waiting for connection...</div>
+            <div class="error-msg" id="error-msg" style="display:none"></div>
+        </div>
+    </div>
+    <button id="resume-btn" title="Relaunch `claude --resume` in this terminal" disabled>▶ Resume Claude</button>
+    <div id="terminal"></div>
+
+    <script>
+        // Diagnostic beacon — parity with embed-shared.js convention
+        try { window.parent.postMessage({type:'embed-script-loaded', at:'top-of-file', ts:Date.now()}, '*'); } catch(e){}
+
+        window.addEventListener('error', function(ev) {
+            try {
+                window.parent.postMessage({
+                    type: 'embed-error',
+                    message: ev.message || String(ev),
+                    filename: ev.filename || '',
+                    lineno: ev.lineno || 0,
+                    colno: ev.colno || 0
+                }, '*');
+            } catch(e){}
+        });
+
+        (function() {
+            'use strict';
+
+            var RECONNECT_MAX = 5;
+            var DEFAULT_PROJECT = '/home/rooted-robotics/software/agent-harness/directives_orchestration_execution_self_improving_system';
+
+            // State injected by parent via postMessage
+            var token = null;
+            var sessionId = null;
+            var context = null;
+            var config = {};
+            var projectPath = DEFAULT_PROJECT;
+
+            var ws = null;
+            var reconnectAttempts = 0;
+            var reconnectTimer = null;
+            var authFailed = false;
+
+            // --- Terminal setup ---
+            var term = new Terminal({
+                theme: {
+                    background: '#0a0f0d',
+                    foreground: '#e0e8e2',
+                    cursor: '#00d47e',
+                    cursorAccent: '#0a0f0d',
+                    selectionBackground: 'rgba(0,212,126,0.3)',
+                    black: '#1a1f1d',
+                    red: '#ff6b6b',
+                    green: '#00d47e',
+                    yellow: '#ffd93d',
+                    blue: '#6c9bff',
+                    magenta: '#c084fc',
+                    cyan: '#67e8f9',
+                    white: '#e0e8e2',
+                    brightBlack: '#4a5450',
+                    brightRed: '#ff8a8a',
+                    brightGreen: '#4ade80',
+                    brightYellow: '#ffe066',
+                    brightBlue: '#93b8ff',
+                    brightMagenta: '#d4a5ff',
+                    brightCyan: '#a5f3fc',
+                    brightWhite: '#ffffff'
+                },
+                fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace",
+                fontSize: 14,
+                lineHeight: 1.2,
+                cursorBlink: true,
+                cursorStyle: 'bar',
+                scrollback: 10000,
+                allowProposedApi: true
+            });
+
+            var fitAddon = new FitAddon.FitAddon();
+            var webLinksAddon = new WebLinksAddon.WebLinksAddon();
+            term.loadAddon(fitAddon);
+            term.loadAddon(webLinksAddon);
+            var termHost = document.getElementById('terminal');
+            term.open(termHost);
+
+            // --- Custom key handler: Shift+Enter / Ctrl+Enter / Ctrl+V ---
+            // Two custom intercepts:
+            //
+            // 1. Shift+Enter / Ctrl+Enter — native Claude Code terminals send
+            //    `\x1b\r` (ESC+CR), which Claude interprets as "newline in prompt"
+            //    rather than "submit". xterm.js by default sends `\r` for both,
+            //    so Claude submits. Intercept and inject the escape sequence.
+            //    Reference: Claude Code's `/terminal-setup` binds Shift+Enter → `\e\r`.
+            //
+            // 2. Ctrl+V / Cmd+V — return false so xterm skips the key entirely.
+            //    If we returned true (default), xterm 5.x would send the raw `^V`
+            //    control char AND call preventDefault() on the keydown, which
+            //    kills the browser's native paste event before xterm's own
+            //    paste handler can catch it. Returning false lets the browser
+            //    fire the paste event normally → xterm's native paste handler
+            //    (with bracketed-paste support) reads clipboardData.
+            //    Mirrors fix a225772 in claudecodeui's React shell.
+            term.attachCustomKeyEventHandler(function(ev) {
+                if (ev.type !== 'keydown') return true;
+                if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey)) {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'input', data: '\x1b\r' }));
+                    }
+                    ev.preventDefault();
+                    return false;
+                }
+                // Ctrl+V (Linux/Win) or Cmd+V (mac) — let browser paste fire
+                if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'v' || ev.key === 'V')) {
+                    return false;
+                }
+                return true;
+            });
+
+            // --- Image paste → upload to server, inject path into PTY ---
+            // Browser paste gives text via xterm's default handler, but image data
+            // in clipboardData.items is dropped. Native Claude Code sees image paths
+            // written to stdin (that's how iTerm2's image paste works). Replicate:
+            // 1. Intercept paste events *before* xterm in capture phase.
+            // 2. If clipboard has an image, upload to /api/paste-image, get a path back.
+            // 3. Write that path into the PTY so Claude reads it as typed text. User
+            //    hits Enter to submit; Claude detects the path and loads the image.
+            // 4. Print a local feedback line so Max knows the paste landed.
+            function getAuthToken() {
+                // Reuse the same token the WebSocket is authenticated with. It was
+                // passed in via the parent postMessage 'init' and stored in `token`.
+                return token;
+            }
+            function handlePastedImage(blob, filenameHint) {
+                var reader = new FileReader();
+                reader.onload = function() {
+                    var dataUrl = reader.result; // "data:image/png;base64,...."
+                    var commaIdx = typeof dataUrl === 'string' ? dataUrl.indexOf(',') : -1;
+                    if (commaIdx < 0) {
+                        term.write('\r\n\x1b[31m[paste: failed to read image from clipboard]\x1b[0m\r\n');
+                        return;
+                    }
+                    var header = dataUrl.slice(5, commaIdx); // "image/png;base64"
+                    var mime = header.split(';')[0] || 'image/png';
+                    var base64 = dataUrl.slice(commaIdx + 1);
+                    var authToken = getAuthToken();
+                    if (!authToken) {
+                        term.write('\r\n\x1b[31m[paste: no auth token yet — wait for terminal to connect]\x1b[0m\r\n');
+                        return;
+                    }
+                    fetch('/api/paste-image', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ' + authToken
+                        },
+                        body: JSON.stringify({ mime: mime, data: base64, filename: filenameHint || null })
+                    }).then(function(resp) {
+                        if (!resp.ok) {
+                            return resp.text().then(function(txt) {
+                                throw new Error('HTTP ' + resp.status + ': ' + txt.slice(0, 200));
+                            });
+                        }
+                        return resp.json();
+                    }).then(function(json) {
+                        if (!json || !json.path) throw new Error('server returned no path');
+                        // Inject the path (no newline) into the PTY so Claude sees it
+                        // as typed text. User presses Enter to submit the prompt.
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'input', data: json.path }));
+                        }
+                        // Local-only feedback (don't echo to the PTY — Claude would
+                        // read it and get confused). `term.write` only shows in xterm.
+                        var displayName = (filenameHint || json.path.split('/').pop() || 'image');
+                        term.write('\r\n\x1b[32m[pasted image: ' + displayName + ' → ' + json.path + ']\x1b[0m\r\n');
+                    }).catch(function(err) {
+                        term.write('\r\n\x1b[31m[paste failed: ' + (err && err.message || err) + ']\x1b[0m\r\n');
+                    });
+                };
+                reader.onerror = function() {
+                    term.write('\r\n\x1b[31m[paste: FileReader error]\x1b[0m\r\n');
+                };
+                reader.readAsDataURL(blob);
+            }
+            // Capture-phase listener runs before xterm's own paste handler. We only
+            // intercept when there's an image; text pastes fall through untouched.
+            termHost.addEventListener('paste', function(ev) {
+                try {
+                    var items = ev.clipboardData && ev.clipboardData.items;
+                    if (!items || !items.length) return;
+                    for (var i = 0; i < items.length; i++) {
+                        var item = items[i];
+                        if (item && typeof item.type === 'string' && item.type.indexOf('image/') === 0) {
+                            var file = item.getAsFile();
+                            if (file) {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                handlePastedImage(file, file.name);
+                                return;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    try { term.write('\r\n\x1b[31m[paste handler error: ' + e.message + ']\x1b[0m\r\n'); } catch(_){}
+                }
+            }, true);
+
+            // Safe fit: the iframe's body may still have 0 layout at this point
+            // (parent hasn't finished sizing the iframe). Calling fitAddon.fit()
+            // against a 0x0 host collapses xterm to cols=1, which makes subsequent
+            // `term.write()` output wrap every character onto its own line — the
+            // "narrow vertical column" bug. Retry until the host has real size.
+            function safeFit() {
+                try {
+                    if (!termHost || termHost.clientWidth < 40 || termHost.clientHeight < 20) return false;
+                    fitAddon.fit();
+                    return true;
+                } catch (e) { return false; }
+            }
+            function fitWhenReady(maxAttempts) {
+                maxAttempts = maxAttempts || 30;
+                var attempts = 0;
+                (function tick() {
+                    if (safeFit()) return;
+                    if (++attempts >= maxAttempts) { try { fitAddon.fit(); } catch(e){} return; }
+                    requestAnimationFrame(tick);
+                })();
+            }
+            fitWhenReady();
+
+            // Refit automatically whenever the host's size changes (iframe resize,
+            // parent layout changes, etc.). Also tell the server the new geometry
+            // so tmux/pty rewraps properly.
+            if (typeof ResizeObserver !== 'undefined') {
+                var ro = new ResizeObserver(function() {
+                    if (safeFit() && ws && ws.readyState === WebSocket.OPEN) {
+                        try {
+                            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+                        } catch(e) {}
+                    }
+                });
+                ro.observe(termHost);
+            }
+
+            // --- Status overlay helpers ---
+            function showStatus(msg) {
+                document.getElementById('status-msg').textContent = msg;
+                document.getElementById('spinner').style.display = 'block';
+                document.getElementById('error-msg').style.display = 'none';
+                document.getElementById('status-overlay').classList.remove('hidden');
+            }
+            function showError(msg) {
+                document.getElementById('spinner').style.display = 'none';
+                document.getElementById('error-msg').textContent = msg;
+                document.getElementById('error-msg').style.display = 'block';
+                document.getElementById('status-overlay').classList.remove('hidden');
+            }
+            function hideOverlay() {
+                document.getElementById('status-overlay').classList.add('hidden');
+            }
+
+            // --- Parent communication ---
+            function notifyParent(type, data) {
+                var message = { type: type };
+                if (data) {
+                    for (var key in data) {
+                        if (data.hasOwnProperty(key)) message[key] = data[key];
+                    }
+                }
+                try { window.parent.postMessage(message, '*'); } catch(e){}
+            }
+
+            // --- WebSocket connection ---
+            function connect() {
+                if (!token) {
+                    showStatus('Waiting for connection...');
+                    return;
+                }
+
+                if (ws) {
+                    try { ws.close(); } catch(e) {}
+                    ws = null;
+                }
+
+                showStatus('Connecting...');
+
+                var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                var wsUrl = protocol + '//' + location.host + '/shell?token=' + encodeURIComponent(token);
+
+                var freshConnect = true;
+                try {
+                    ws = new WebSocket(wsUrl);
+                } catch (e) {
+                    showError('WebSocket creation failed: ' + e.message);
+                    return;
+                }
+
+                ws.onopen = function() {
+                    freshConnect = false;
+                    reconnectAttempts = 0;
+                    authFailed = false;
+
+                    // Make sure we send real dimensions, not the cols=1 xterm
+                    // state that can occur if the iframe wasn't sized yet.
+                    safeFit();
+
+                    // Chat-v2 Terminal mode runs inside an iframe Max has already trusted, so we
+                    // opt into `--dangerously-skip-permissions` server-side (see server/index.js
+                    // /shell handler) unless the parent explicitly disables it via
+                    // config.skipPermissions === false. This spares Max from approving every
+                    // tool call — which is the whole point of this embed.
+                    var skipPermissions = !(config && config.skipPermissions === false);
+                    ws.send(JSON.stringify({
+                        type: 'init',
+                        projectPath: projectPath,
+                        sessionId: sessionId || '',
+                        hasSession: !!sessionId,
+                        provider: (config && config.provider) || 'claude',
+                        skipPermissions: skipPermissions,
+                        cols: term.cols,
+                        rows: term.rows
+                    }));
+
+                    notifyParent('connection-status', { status: 'connected' });
+                    setTimeout(hideOverlay, 300);
+                    updateResumeBtnState();
+                };
+
+                ws.onmessage = function(event) {
+                    try {
+                        var msg = JSON.parse(event.data);
+                        if (msg.type === 'output') {
+                            term.write(msg.data);
+                        } else if (msg.type === 'exit') {
+                            term.write('\r\n\x1b[36m[Session ended]\x1b[0m\r\n');
+                        } else if (msg.type === 'error') {
+                            term.write('\r\n\x1b[31m[Error: ' + (msg.message || 'Unknown') + ']\x1b[0m\r\n');
+                        } else if (msg.type === 'auth-url') {
+                            term.write('\r\n\x1b[33m[Auth URL detected — open in browser]\x1b[0m\r\n');
+                        }
+                    } catch(e) {
+                        term.write(event.data);
+                    }
+                };
+
+                ws.onclose = function(event) {
+                    ws = null;
+                    updateResumeBtnState();
+
+                    if (freshConnect && (event.code === 1006 || event.code === 1008) && !authFailed) {
+                        authFailed = true;
+                        notifyParent('connection-status', { status: 'auth-expired' });
+                        showError('Authentication failed or expired');
+                        return;
+                    }
+
+                    notifyParent('connection-status', { status: 'disconnected' });
+
+                    if (reconnectAttempts < RECONNECT_MAX) {
+                        reconnectAttempts++;
+                        var delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 15000);
+                        showStatus('Reconnecting (attempt ' + reconnectAttempts + '/' + RECONNECT_MAX + ')...');
+                        reconnectTimer = setTimeout(connect, delay);
+                    } else {
+                        showError('Connection lost. Server may be restarting.');
+                        notifyParent('connection-status', { status: 'failed' });
+                    }
+                };
+
+                ws.onerror = function() {
+                    // onclose will fire; handle reconnect there
+                };
+            }
+
+            // --- Terminal I/O ---
+            term.onData(function(data) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'input', data: data }));
+                }
+            });
+
+            term.onResize(function(size) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
+                }
+            });
+
+            // --- Window resize ---
+            // ResizeObserver above handles host-size changes; this handler
+            // covers parent-window viewport changes that don't resize the host.
+            var resizeTimeout;
+            window.addEventListener('resize', function() {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(function() { safeFit(); }, 100);
+            });
+
+            // --- postMessage protocol from parent ---
+            window.addEventListener('message', function(event) {
+                var msg = event.data;
+                if (!msg || !msg.type) return;
+
+                switch (msg.type) {
+                    case 'init':
+                        token = msg.token || null;
+                        sessionId = msg.sessionId || null;
+                        context = msg.context || null;
+                        config = msg.config || {};
+                        if (config.projectPath) projectPath = config.projectPath;
+                        reconnectAttempts = 0;
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        try { console.log('[TerminalEmbed] init', { sessionId: sessionId, hasToken: !!token }); } catch(e) {}
+                        if (typeof updateResumeBtnState === 'function') updateResumeBtnState();
+                        if (token) connect();
+                        break;
+
+                    case 'switch-session':
+                        sessionId = msg.sessionId || null;
+                        context = msg.context || context;
+                        reconnectAttempts = 0;
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        try { console.log('[TerminalEmbed] switch-session', { sessionId: sessionId }); } catch(e) {}
+                        if (typeof updateResumeBtnState === 'function') updateResumeBtnState();
+                        // Clear the displayed terminal buffer before reconnecting
+                        term.reset();
+                        if (ws) {
+                            try { ws.close(); } catch(e) {}
+                            ws = null;
+                        }
+                        if (token) connect();
+                        break;
+
+                    case 'focus':
+                        term.focus();
+                        break;
+
+                    case 'sendInput':
+                        // Programmatic keystroke injection for automation/QA.
+                        // Payload: { type:'sendInput', data:'<chars including \\x03 for ctrl-c>' }
+                        if (typeof msg.data === 'string' && ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'input', data: msg.data }));
+                        }
+                        break;
+
+                    case 'getScreen':
+                        // Returns the currently visible + scrollback buffer as text.
+                        // Payload: { type:'getScreen', requestId?: '<opaque>' }
+                        // Response: { type:'screen', requestId, text, cols, rows }
+                        try {
+                            var lines = [];
+                            var buf = term.buffer && term.buffer.active;
+                            if (buf) {
+                                var total = buf.length;
+                                for (var i = 0; i < total; i++) {
+                                    var line = buf.getLine(i);
+                                    if (line) lines.push(line.translateToString(true));
+                                }
+                            }
+                            notifyParent('screen', {
+                                requestId: msg.requestId || null,
+                                text: lines.join('\n'),
+                                cols: term.cols,
+                                rows: term.rows
+                            });
+                        } catch (e) {
+                            notifyParent('screen', {
+                                requestId: msg.requestId || null,
+                                error: String(e && e.message || e)
+                            });
+                        }
+                        break;
+                }
+            });
+
+            // Legacy: also respond to string 'focus-terminal' (parity with terminal.html)
+            window.addEventListener('message', function(event) {
+                if (event.data === 'focus-terminal') term.focus();
+            });
+
+            window.addEventListener('focus', function() { term.focus(); });
+
+            // --- Resume Claude button ---
+            // Visible always; enabled only when we BOTH have a live WS AND a
+            // known sessionId for this chat. Click writes `claude --resume
+            // <sessionId>\n` to the PTY. We refuse to send a bare `claude\n`
+            // because that mints a FRESH session — surprising the user, who
+            // wanted to resume the chat they're looking at. (User-reported
+            // bug: "Resume button creates a new session, not the chat's
+            // session.") Pre-fix, an empty sessionId fell through to the
+            // bare-claude branch; now the button is greyed out and the
+            // tooltip explains why.
+            var resumeBtn = document.getElementById('resume-btn');
+            function updateResumeBtnState() {
+                if (!resumeBtn) return;
+                var wsReady = !!(ws && ws.readyState === WebSocket.OPEN);
+                var hasSession = !!sessionId;
+                resumeBtn.disabled = !(wsReady && hasSession);
+                if (!wsReady) {
+                    resumeBtn.title = 'Resume Claude — connecting…';
+                } else if (!hasSession) {
+                    resumeBtn.title = 'Resume Claude — no session for this chat yet. Send a message first to mint one.';
+                } else {
+                    resumeBtn.title = 'Relaunch `claude --resume ' + sessionId + '` in this terminal';
+                }
+            }
+            if (resumeBtn) {
+                resumeBtn.addEventListener('click', function() {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                    if (!sessionId) {
+                        // Defensive — UI should already be disabling the button, but
+                        // belt-and-suspenders against a stale-closure click race.
+                        try { console.warn('[TerminalEmbed] Resume click ignored — no sessionId for this chat'); } catch(e) {}
+                        return;
+                    }
+                    // Match the server-side default for this embed: launch Claude with
+                    // --dangerously-skip-permissions unless parent explicitly disabled it.
+                    var skipFlag = !(config && config.skipPermissions === false)
+                        ? ' --dangerously-skip-permissions' : '';
+                    var cmd = 'claude' + skipFlag + ' --resume "' + sessionId + '"\n';
+                    try { console.log('[TerminalEmbed] Resume →', cmd.trim()); } catch(e) {}
+                    ws.send(JSON.stringify({ type: 'input', data: cmd }));
+                    term.focus();
+                });
+            }
+
+            // --- Ready signal ---
+            document.addEventListener('DOMContentLoaded', function() {
+                notifyParent('embed-ready', {});
+            });
+            // In case DOMContentLoaded already fired
+            if (document.readyState !== 'loading') {
+                notifyParent('embed-ready', {});
+            }
+
+            term.focus();
+        })();
+    </script>
+</body>
+</html>
