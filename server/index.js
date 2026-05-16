@@ -428,6 +428,45 @@ app.use('/api/terminal', authenticateToken, terminalRoutes);
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
 
+// BUG-13: TTS proxy to Kokoro. The car-embed.html iframe POSTs to /api/tts
+// expecting an audio blob; that route never existed, so car-mode TTS was
+// silently failing (just a console.warn). Kokoro runs locally on this VM via
+// docker (container "rooted-tts", image ghcr.io/remsky/kokoro-fastapi-cpu),
+// bound to 127.0.0.1:8101, with an OpenAI-compatible /v1/audio/speech endpoint.
+// Proxy the iframe's {text: ...} request to Kokoro and stream the MP3 back.
+// Auth: same token gate as the rest of the iframe API.
+app.post('/api/tts', authenticateToken, async (req, res) => {
+    try {
+        const text = (req.body && typeof req.body.text === 'string') ? req.body.text.trim() : '';
+        if (!text) return res.status(400).json({ error: 'text required' });
+        // Voice can be overridden by request; default to "af_bella" (validated working).
+        const voice = (req.body && typeof req.body.voice === 'string') ? req.body.voice : 'af_bella';
+        const kokoroResp = await fetch('http://127.0.0.1:8101/v1/audio/speech', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'kokoro',
+                input: text,
+                voice: voice,
+                response_format: 'mp3'
+            })
+        });
+        if (!kokoroResp.ok) {
+            const errBody = await kokoroResp.text();
+            console.error('[TTS] Kokoro non-200:', kokoroResp.status, errBody.slice(0, 200));
+            return res.status(502).json({ error: 'Kokoro error ' + kokoroResp.status, detail: errBody.slice(0, 300) });
+        }
+        // Stream the audio response straight through to the client.
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Cache-Control', 'no-store');
+        const ab = await kokoroResp.arrayBuffer();
+        res.end(Buffer.from(ab));
+    } catch (err) {
+        console.error('[TTS] proxy failed:', err && err.message);
+        res.status(500).json({ error: err && err.message ? err.message : 'tts proxy failed' });
+    }
+});
+
 // Serve public files (like api-docs.html, embed-shared.js, *-embed.html).
 // BUG-12 fix: these files are NOT hashed (unlike dist/) and they ARE iframe-loaded
 // from the mega-app, so without explicit no-cache headers the browser holds onto
