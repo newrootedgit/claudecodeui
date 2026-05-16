@@ -52,6 +52,7 @@ import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGemini
 import sessionManager from './sessionManager.js';
 import gitRoutes from './routes/git.js';
 import authRoutes from './routes/auth.js';
+import completeRoutes from './routes/complete.js';
 import mcpRoutes from './routes/mcp.js';
 import cursorRoutes from './routes/cursor.js';
 import taskmasterRoutes from './routes/taskmaster.js';
@@ -381,6 +382,9 @@ app.use('/api', validateApiKey);
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
 
+// Single-shot Claude completion endpoint (Vercel-side discovery enrichment)
+app.use('/api/complete', authenticateToken, completeRoutes);
+
 // Projects API Routes (protected)
 app.use('/api/projects', authenticateToken, projectsRoutes);
 
@@ -424,8 +428,17 @@ app.use('/api/terminal', authenticateToken, terminalRoutes);
 // Agent API Routes (uses API key authentication)
 app.use('/api/agent', agentRoutes);
 
-// Serve public files (like api-docs.html)
-app.use(express.static(path.join(__dirname, '../public')));
+// Serve public files (like api-docs.html, embed-shared.js, *-embed.html).
+// BUG-12 fix: these files are NOT hashed (unlike dist/) and they ARE iframe-loaded
+// from the mega-app, so without explicit no-cache headers the browser holds onto
+// stale embed-shared.js / *-embed.html across deploys until users manually hard-refresh.
+// no-cache means the browser revalidates each load (304 if unchanged, fast), but
+// always picks up new code on the very next request after a deploy.
+app.use(express.static(path.join(__dirname, '../public'), {
+    setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    }
+}));
 
 // Static files served after API routes
 // Add cache control: HTML files should not be cached, but assets can be cached
