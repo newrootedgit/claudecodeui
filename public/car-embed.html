@@ -58,6 +58,7 @@
             width: 72px;
             height: 72px;
             min-width: 72px;
+            min-height: 72px; /* BUG: prevent flex parent from squishing height (mobile fuzz, 2026-05-17) */
             border-radius: 50%;
             background: #00d47e;
             color: #0a0f0d;
